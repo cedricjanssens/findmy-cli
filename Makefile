@@ -25,3 +25,18 @@ clean:
 
 install: build
 	cp $(GO_BIN) $(HELPER_BIN) /usr/local/bin/
+
+# Reinstall over Homebrew without sudo. Run `make claim` once first.
+BREW_BIN := $(shell brew --cellar findmy-cli 2>/dev/null)/0.1.0/bin
+
+reinstall: build
+	@if [ -w "$(BREW_BIN)/findmy" ] 2>/dev/null; then \
+		cp $(GO_BIN) $(BREW_BIN)/findmy && cp $(HELPER_BIN) $(BREW_BIN)/findmy-helper && echo "Installed to $(BREW_BIN)"; \
+	else \
+		echo "error: $(BREW_BIN) not writable. Run 'make claim' once (needs sudo)."; exit 1; \
+	fi
+
+# One-time: make Homebrew binaries writable so reinstall works without sudo.
+claim:
+	chmod u+w "$(BREW_BIN)/findmy" "$(BREW_BIN)/findmy-helper"
+	@echo "Done — 'make reinstall' now works without sudo."

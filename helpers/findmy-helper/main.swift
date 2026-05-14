@@ -115,6 +115,21 @@ func cmdClick(_ args: [String]) {
     print("{\"ok\":true}")
 }
 
+func cmdScroll(_ args: [String]) {
+    guard args.count >= 3, let x = Double(args[0]), let y = Double(args[1]), let dy = Int32(args[2]) else {
+        die("usage: findmy-helper scroll <x> <y> <dy> (dy: negative=down, positive=up)")
+    }
+    let pt = CGPoint(x: x, y: y)
+    let src = CGEventSource(stateID: .hidSystemState)
+    // Move mouse to position first (scroll targets the window under cursor).
+    let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: pt, mouseButton: .left)
+    move?.post(tap: .cghidEventTap)
+    usleep(50_000)
+    let scroll = CGEvent(scrollWheelEvent2Source: src, units: .line, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0)
+    scroll?.post(tap: .cghidEventTap)
+    print("{\"ok\":true}")
+}
+
 struct Permissions: Encodable {
     let screenRecording: Bool
     let accessibility: Bool
@@ -153,6 +168,7 @@ switch sub {
 case "window": cmdWindow(rest)
 case "ocr": cmdOCR(rest)
 case "click": cmdClick(rest)
+case "scroll": cmdScroll(rest)
 case "permissions": cmdPermissions(rest)
 default: die("unknown subcommand: \(sub)")
 }

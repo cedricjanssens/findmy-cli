@@ -250,6 +250,13 @@ func Click(x, y int) error {
 	return err
 }
 
+// Scroll sends a scroll-wheel event at the given screen coordinates.
+// dy < 0 scrolls down, dy > 0 scrolls up.
+func Scroll(x, y, dy int) error {
+	_, err := runHelper("scroll", fmt.Sprintf("%d", x), fmt.Sprintf("%d", y), fmt.Sprintf("%d", dy))
+	return err
+}
+
 // wakeDisplay nudges the display awake by holding a 3-second user-activity
 // assertion. Needed for headless / closed-lid use with a dummy USB-C display:
 // the dummy plug enables clamshell mode but macOS still idle-sleeps it, and
@@ -653,4 +660,264 @@ func looksLikeAddress(s string) bool {
 		return true
 	}
 	return strings.Contains(s, ",") && len(s) > 10
+}
+
+// --- Devices tab / Ring support ---
+
+// Device represents an entry in the FindMy Devices sidebar.
+type Device struct {
+	Name     string `json:"name"`
+	Location string `json:"location,omitempty"`
+	Status   string `json:"status,omitempty"` // "En pause", "Maintenant", "Connecté(e)", etc.
+	Group    string `json:"group,omitempty"`  // "Appareils de Christel", etc.
+	NameY    int    `json:"-"`
+	NameX    int    `json:"-"`
+}
+
+// PrepareDevices activates FindMy and switches to the Devices tab.
+// Returns the window metadata. Caller should defer RestoreUserSpace() if needed.
+func PrepareDevices() (*Window, error) {
+	if err := requirePermissions(true); err != nil {
+		return nil, err
+	}
+
+	wakeDisplay()
+
+	w, _ := MainWindow()
+	if w == nil || !w.OnScreen {
+		previousApp = rememberFrontApp()
+		if err := Activate(); err != nil {
+			return nil, err
+		}
+		time.Sleep(900 * time.Millisecond)
+	}
+
+	_ = SwitchTab(GetAppStrings().DevicesTab)
+	time.Sleep(1000 * time.Millisecond)
+
+	return MainWindow()
+}
+
+// ScanDevices captures the Devices sidebar and parses device entries.
+// It scrolls through the sidebar to find all devices, including those
+// off-screen. Returns all found devices.
+func ScanDevices(w *Window, tmpDir string) ([]Device, error) {
+	scale := 1.0
+	sidebarRightPx := int(340 * scale)
+	textColMinPx := int(50 * scale)
+	topMarginPx := int(90 * scale)
+
+	var allDevices []Device
+	seen := map[string]bool{}
+
+	// Scroll position in the sidebar
+	sidebarX := w.X + 150
+	sidebarY := w.Y + w.Height/2
+
+	for scrollPass := 0; scrollPass < 6; scrollPass++ {
+		shot := filepath.Join(tmpDir, fmt.Sprintf("devices_%d.png", scrollPass))
+		if err := Capture(w, shot); err != nil {
+			return allDevices, fmt.Errorf("capture devices: %w", err)
+		}
+		lines, err := OCR(shot)
+		if err != nil {
+			return allDevices, fmt.Errorf("ocr devices: %w", err)
+		}
+		_ = os.Remove(shot)
+
+		devices := parseDeviceSidebar(lines, sidebarRightPx, textColMinPx, topMarginPx)
+		newCount := 0
+		for _, d := range devices {
+			if !seen[d.Name] {
+				seen[d.Name] = true
+				allDevices = append(allDevices, d)
+				newCount++
+			}
+		}
+
+		// If no new devices found, we've reached the end.
+		if newCount == 0 && scrollPass > 0 {
+			break
+		}
+
+		// Scroll down in the sidebar.
+		_ = Scroll(sidebarX, sidebarY, -5)
+		time.Sleep(600 * time.Millisecond)
+	}
+
+	return allDevices, nil
+}
+
+// parseDeviceSidebar extracts device entries from a Devices tab screenshot.
+func parseDeviceSidebar(lines []TextLine, sidebarRightPx, textColMinPx, topMarginPx int) []Device {
+	var rows []TextLine
+	for _, l := range lines {
+		if strings.TrimSpace(l.Text) == "" {
+			continue
+		}
+		if l.X+l.Width/2 >= sidebarRightPx {
+			continue
+		}
+		if l.Y < topMarginPx {
+			continue
+		}
+		if l.X < textColMinPx {
+			continue
+		}
+		rows = append(rows, l)
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Y == rows[j].Y {
+			return rows[i].X < rows[j].X
+		}
+		return rows[i].Y < rows[j].Y
+	})
+
+	skip := map[string]bool{
+		"Personnes": true, "Appareils": true, "Objets": true,
+		"People": true, "Devices": true, "Items": true,
+		"Mentions légales": true, "Legal Notices": true,
+	}
+
+	var devices []Device
+	var currentGroup string
+
+	for _, l := range rows {
+		txt := strings.TrimSpace(l.Text)
+		if skip[txt] {
+			continue
+		}
+		lower := strings.ToLower(txt)
+
+		// Detect group headers: "Appareils de X"
+		if strings.HasPrefix(lower, "appareils de ") || strings.HasPrefix(lower, "devices of ") ||
+			strings.HasPrefix(lower, "geräte von ") || strings.HasPrefix(lower, "dispositivos de ") {
+			currentGroup = txt
+			continue
+		}
+
+		// Skip status/location lines (they follow a device name).
+		if strings.Contains(lower, "en pause") || strings.Contains(lower, "aucune position") ||
+			strings.Contains(lower, "connecté") || strings.Contains(lower, "maintenant") ||
+			strings.Contains(lower, "pas de partage") || strings.Contains(lower, "position trouvée") ||
+			strings.Contains(lower, "avec vous") || strings.Contains(lower, "ce mac") ||
+			strings.Contains(lower, "rue ") || strings.Contains(lower, "no location") {
+			// Attach to last device as status/location.
+			if len(devices) > 0 {
+				last := &devices[len(devices)-1]
+				if last.Location == "" {
+					last.Location = txt
+				} else if last.Status == "" {
+					last.Status = txt
+				}
+			}
+			continue
+		}
+
+		// Distance info.
+		if isDistance(txt) {
+			continue
+		}
+
+		// Otherwise it's a device name.
+		devices = append(devices, Device{
+			Name:  txt,
+			Group: currentGroup,
+			NameY: l.Y,
+			NameX: l.X,
+		})
+	}
+
+	return devices
+}
+
+// RingDevice clicks on a device in the Devices sidebar, opens its detail card
+// on the map, finds the "Émettre un son" / "Play Sound" button, and clicks it.
+//
+// Set dryRun=true to perform all steps except the final click (for testing).
+func RingDevice(w *Window, device *Device, tmpDir string, dryRun bool) error {
+	if err := requirePermissions(true); err != nil {
+		return err
+	}
+
+	// Activate FindMy (needed for Devices tab clicks).
+	needRestore := false
+	if !w.OnScreen {
+		previousApp = rememberFrontApp()
+		needRestore = true
+	}
+	_ = Activate()
+	time.Sleep(800 * time.Millisecond)
+	if needRestore {
+		defer RestoreUserSpace()
+	}
+
+	scale := 1.0 // virtual display = 1x
+
+	// Click the device in the sidebar.
+	screenX := w.X + int(float64(device.NameX)/scale)
+	screenY := w.Y + int(float64(device.NameY)/scale) + 8
+	if err := Click(screenX, screenY); err != nil {
+		return fmt.Errorf("click device: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// Double-click the map pin (center of map area) to open the detail card.
+	sidebarWidth := int(340 * scale)
+	mapCenterX := w.X + sidebarWidth + (w.Width-sidebarWidth)/2
+	mapCenterY := w.Y + w.Height/2
+	_ = Click(mapCenterX, mapCenterY)
+	time.Sleep(1000 * time.Millisecond)
+	_ = Click(mapCenterX, mapCenterY)
+	time.Sleep(1500 * time.Millisecond)
+
+	// Capture and OCR the detail card to find "Émettre un son" / "Play Sound".
+	shot := filepath.Join(tmpDir, "ring-detail.png")
+	if err := Capture(w, shot); err != nil {
+		return fmt.Errorf("capture ring detail: %w", err)
+	}
+	lines, err := OCR(shot)
+	if err != nil {
+		return fmt.Errorf("ocr ring detail: %w", err)
+	}
+
+	// Find the "Play Sound" button.
+	playSoundLabels := []string{
+		"émettre un son", "play sound", "ton abspielen",
+		"reproducir sonido", "riproduci suono", "emitir som",
+		"サウンドを再生", "사운드 재생", "播放声音",
+	}
+
+	var buttonLine *TextLine
+	for i, l := range lines {
+		lower := strings.ToLower(strings.TrimSpace(l.Text))
+		for _, label := range playSoundLabels {
+			if strings.Contains(lower, label) {
+				buttonLine = &lines[i]
+				break
+			}
+		}
+		if buttonLine != nil {
+			break
+		}
+	}
+
+	if buttonLine == nil {
+		return fmt.Errorf("'Play Sound' button not found in detail card (device may be offline)")
+	}
+
+	// Click the button.
+	btnX := w.X + int(float64(buttonLine.X+buttonLine.Width/2)/scale)
+	btnY := w.Y + int(float64(buttonLine.Y+buttonLine.Height/2)/scale)
+
+	if dryRun {
+		fmt.Fprintf(os.Stderr, "dry-run: would click 'Play Sound' at screen (%d, %d)\n", btnX, btnY)
+		return nil
+	}
+
+	if err := Click(btnX, btnY); err != nil {
+		return fmt.Errorf("click play sound: %w", err)
+	}
+
+	return nil
 }

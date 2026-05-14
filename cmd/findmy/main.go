@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/oshahine/findmy-cli/internal/findmy"
 )
@@ -21,6 +22,10 @@ func main() {
 		runPeople(os.Args[2:])
 	case "person":
 		runPerson(os.Args[2:])
+	case "devices":
+		runDevices(os.Args[2:])
+	case "ring":
+		runRing(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -34,18 +39,23 @@ func usage() {
 
 Usage:
   findmy people [--json] [--keep]
-  findmy person <name> [--json] [--keep]
+  findmy person <name> [--json] [--zoom] [--keep]
+  findmy devices [--json] [--keep]
+  findmy ring <device> [--confirm] [--keep]
 
 Flags:
-  --json   emit JSON instead of a human table
-  --keep   leave debug screenshots in /tmp/findmy-cli/`)
+  --json      emit JSON instead of a human table
+  --zoom      click to get precise street address (person only)
+  --confirm   required for ring — actually plays the sound
+  --keep      leave debug screenshots in /tmp/findmy-cli/`)
 	os.Exit(2)
 }
 
 type runOpts struct {
-	json bool
-	keep bool
-	zoom bool
+	json    bool
+	keep    bool
+	zoom    bool
+	confirm bool
 }
 
 // parseOpts splits args into known flags and positional args. Go's flag
@@ -63,6 +73,8 @@ func parseOpts(args []string) (runOpts, []string) {
 			o.keep = true
 		case "--zoom", "-zoom":
 			o.zoom = true
+		case "--confirm", "-confirm":
+			o.confirm = true
 		default:
 			positional = append(positional, a)
 		}
@@ -225,6 +237,139 @@ func imageSize(path string) (imgInfo, error) {
 		return imgInfo{}, err
 	}
 	return imgInfo{W: cfg.Width, H: cfg.Height}, nil
+}
+
+func runDevices(args []string) {
+	opts, _ := parseOpts(args)
+
+	w, err := findmy.PrepareDevices()
+	must(err)
+	defer findmy.RestoreUserSpace()
+
+	devices, err := findmy.ScanDevices(w, tmpDir())
+	must(err)
+
+	// Switch back to People tab for next run.
+	_ = findmy.SwitchTab(findmy.GetAppStrings().PeopleTab)
+
+	if opts.json {
+		emitJSON(devices)
+		return
+	}
+	if len(devices) == 0 {
+		fmt.Println("(no devices found)")
+		return
+	}
+	for _, d := range devices {
+		fmt.Printf("%s", d.Name)
+		if d.Location != "" {
+			fmt.Printf("  %s", d.Location)
+		}
+		if d.Group != "" {
+			fmt.Printf("  [%s]", d.Group)
+		}
+		fmt.Println()
+	}
+}
+
+func runRing(args []string) {
+	opts, rest := parseOpts(args)
+	if len(rest) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: findmy ring <device> [--confirm]")
+		os.Exit(2)
+	}
+	target := strings.ToLower(strings.Join(rest, " "))
+
+	if !opts.confirm {
+		fmt.Fprintf(os.Stderr, "This will make the device play a loud sound.\nAdd --confirm to actually ring it.\n")
+		fmt.Fprintf(os.Stderr, "Running in dry-run mode (will locate the button but not click it).\n\n")
+	}
+
+	w, err := findmy.PrepareDevices()
+	must(err)
+
+	devices, err := findmy.ScanDevices(w, tmpDir())
+	must(err)
+
+	// Find matching device.
+	var match *findmy.Device
+	for i := range devices {
+		if strings.EqualFold(strings.TrimSpace(devices[i].Name), target) {
+			match = &devices[i]
+			break
+		}
+	}
+	if match == nil {
+		for i := range devices {
+			if strings.Contains(strings.ToLower(devices[i].Name), target) {
+				match = &devices[i]
+				break
+			}
+		}
+	}
+	if match == nil {
+		fmt.Fprintf(os.Stderr, "no device matching %q\navailable devices:\n", target)
+		for _, d := range devices {
+			fmt.Fprintf(os.Stderr, "  %s\n", d.Name)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stderr, "Found: %s\n", match.Name)
+
+	// We need the device to be visible in the sidebar for the click.
+	// Scroll back to top first, then scroll until we find it.
+	sidebarX := w.X + 150
+	sidebarY := w.Y + w.Height/2
+	for i := 0; i < 10; i++ {
+		_ = findmy.Scroll(sidebarX, sidebarY, 5) // scroll up
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Now scroll down and look for the device, refreshing its Y position.
+	found := false
+	for scrollPass := 0; scrollPass < 10; scrollPass++ {
+		shot := filepath.Join(tmpDir(), "ring-scan.png")
+		_ = findmy.Capture(w, shot)
+		lines, _ := findmy.OCR(shot)
+		_ = os.Remove(shot)
+
+		for _, l := range lines {
+			if strings.Contains(strings.ToLower(l.Text), strings.ToLower(match.Name)) ||
+				strings.Contains(strings.ToLower(match.Name), strings.ToLower(strings.TrimSpace(l.Text))) {
+				match.NameY = l.Y
+				match.NameX = l.X
+				found = true
+				break
+			}
+		}
+		if found {
+			break
+		}
+		_ = findmy.Scroll(sidebarX, sidebarY, -3)
+		time.Sleep(400 * time.Millisecond)
+	}
+
+	if !found {
+		fmt.Fprintf(os.Stderr, "error: could not scroll to %q in sidebar\n", match.Name)
+		os.Exit(1)
+	}
+
+	dryRun := !opts.confirm
+	if err := findmy.RingDevice(w, match, tmpDir(), dryRun); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if dryRun {
+		fmt.Println("Dry-run complete. Add --confirm to ring.")
+	} else {
+		fmt.Printf("Ringing %s...\n", match.Name)
+	}
+
+	// Restore People tab.
+	_ = findmy.SwitchTab(findmy.GetAppStrings().PeopleTab)
+	findmy.RestoreUserSpace()
 }
 
 func emitJSON(v any) {
