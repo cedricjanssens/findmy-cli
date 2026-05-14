@@ -90,8 +90,8 @@ func runPeople(args []string) {
 	lines, err := findmy.OCR(shot)
 	must(err)
 
-	sidebarRightPx, textColMinPx := pixelLayout(w, shot)
-	people := findmy.ParsePeople(lines, sidebarRightPx, textColMinPx)
+	sidebarRightPx, textColMinPx, topMarginPx := pixelLayout(w, shot)
+	people := findmy.ParsePeople(lines, sidebarRightPx, textColMinPx, topMarginPx)
 
 	if opts.json {
 		emitJSON(people)
@@ -134,8 +134,8 @@ func runPerson(args []string) {
 	lines, err := findmy.OCR(shot)
 	must(err)
 
-	sidebarRightPx, textColMinPx := pixelLayout(w, shot)
-	people := findmy.ParsePeople(lines, sidebarRightPx, textColMinPx)
+	sidebarRightPx, textColMinPx, topMarginPx := pixelLayout(w, shot)
+	people := findmy.ParsePeople(lines, sidebarRightPx, textColMinPx, topMarginPx)
 
 	var match *findmy.Person
 	for i := range people {
@@ -192,9 +192,9 @@ func runPerson(args []string) {
 // drops centered avatar OCR fragments while admitting real name/location
 // text that begins around 90pt. We use a float scale because some displays
 // (e.g. a 4K dummy plug) report non-integer pixel-per-point ratios.
-func pixelLayout(w *findmy.Window, imagePath string) (sidebarRightPx, textColMinPx int) {
+func pixelLayout(w *findmy.Window, imagePath string) (sidebarRightPx, textColMinPx, topMarginPx int) {
 	scale := imageScale(w, imagePath)
-	return int(340 * scale), int(80 * scale)
+	return int(340 * scale), int(80 * scale), int(120 * scale)
 }
 
 func windowPointFromImagePoint(w *findmy.Window, imagePath string, px, py int) (int, int) {

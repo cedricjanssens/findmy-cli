@@ -311,7 +311,7 @@ func RestoreUserSpace() {
 // We discard the avatar band entirely (it produces low-confidence fragments
 // like "Is" or "rk" from initials and shadows that otherwise get misread as
 // person names), then walk the remaining lines top-to-bottom.
-func ParsePeople(lines []TextLine, sidebarRightPx, textColMinPx int) []Person {
+func ParsePeople(lines []TextLine, sidebarRightPx, textColMinPx, topMarginPx int) []Person {
 	rows := make([]TextLine, 0, len(lines))
 	for _, l := range lines {
 		if strings.TrimSpace(l.Text) == "" {
@@ -320,7 +320,7 @@ func ParsePeople(lines []TextLine, sidebarRightPx, textColMinPx int) []Person {
 		if l.X+l.Width/2 >= sidebarRightPx {
 			continue
 		}
-		if l.Y < 240 {
+		if l.Y < topMarginPx {
 			continue
 		}
 		if l.X < textColMinPx {
