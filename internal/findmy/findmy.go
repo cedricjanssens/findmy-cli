@@ -37,6 +37,9 @@ type Person struct {
 	Location  string `json:"location,omitempty"`
 	Staleness string `json:"staleness,omitempty"`
 	Distance  string `json:"distance,omitempty"`
+	Address   string `json:"address,omitempty"`
+	NameY     int    `json:"-"` // image pixel Y of the name row (for click targeting)
+	NameX     int    `json:"-"` // image pixel X of the name row
 }
 
 func helper() string {
@@ -279,7 +282,7 @@ func ParsePeople(lines []TextLine, sidebarRightPx, textColMinPx int) []Person {
 			continue
 		}
 		if current == nil || current.Location != "" {
-			people = append(people, Person{Name: txt})
+			people = append(people, Person{Name: txt, NameY: l.Y, NameX: l.X})
 			current = &people[len(people)-1]
 			continue
 		}
@@ -338,4 +341,175 @@ func splitLocationStaleness(s string) (location, staleness string) {
 		return strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+len("•"):])
 	}
 	return s, ""
+}
+
+// DetailAddress clicks on a person's row in the sidebar so FindMy zooms the
+// map to their location, then captures the window and extracts the nearest
+// street name from the map labels. This provides more precise location than
+// the coarse city name from the sidebar.
+//
+// Requires Accessibility permission for the click.
+// sidebarShot is the people screenshot (used to compute image-to-screen scale).
+// detailDest is the path where the detail screenshot will be saved.
+func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (string, error) {
+	if err := requirePermissions(true); err != nil {
+		return "", err
+	}
+
+	scale := computeScale(w, sidebarShot)
+	sidebarRightPx := int(340 * scale)
+
+	// Click the person's name row in the sidebar to zoom the map.
+	screenX := w.X + int(float64(person.NameX)/scale) + 20
+	screenY := w.Y + int(float64(person.NameY)/scale) + 8
+	if err := Click(screenX, screenY); err != nil {
+		return "", fmt.Errorf("click person row: %w", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	// Click the pin on the map to open the detail card. The pin is roughly
+	// centered in the map area after the sidebar click zooms to the person.
+	// FindMy sometimes needs two clicks: pin click → popup → second click → detail.
+	// We retry up to 3 times, checking OCR for the detail card after each attempt.
+	mapCenterX := w.X + int(float64(sidebarRightPx)/scale) + (w.Width-int(float64(sidebarRightPx)/scale))/2
+	mapCenterY := w.Y + w.Height/2
+
+	for attempt := 0; attempt < 3; attempt++ {
+		_ = Click(mapCenterX, mapCenterY)
+		time.Sleep(1500 * time.Millisecond)
+
+		if err := Capture(w, detailDest); err != nil {
+			return "", fmt.Errorf("detail capture: %w", err)
+		}
+		lines, err := OCR(detailDest)
+		if err != nil {
+			return "", fmt.Errorf("detail ocr: %w", err)
+		}
+		if addr := parseDetailPane(lines, person, sidebarRightPx); addr != "" {
+			return addr, nil
+		}
+		// Detail card not open yet — retry click.
+	}
+
+	return "", fmt.Errorf("detail card did not appear after 3 click attempts")
+}
+
+func computeScale(w *Window, imagePath string) float64 {
+	scale := 2.0
+	if info, err := imageSize(imagePath); err == nil && w.Width > 0 {
+		if s := float64(info.W) / float64(w.Width); s >= 1 {
+			scale = s
+		}
+	}
+	return scale
+}
+
+// imageSize returns the pixel dimensions of a PNG file. Duplicated here from
+// cmd/findmy to keep the internal package self-contained.
+func imageSize(path string) (struct{ W, H int }, error) {
+	type dims struct{ W, H int }
+	f, err := os.Open(path)
+	if err != nil {
+		return dims{}, err
+	}
+	defer f.Close()
+	// Read PNG header: 8 magic bytes, then IHDR chunk (4 len + 4 type + 4 width + 4 height)
+	var buf [24]byte
+	if _, err := f.Read(buf[:]); err != nil {
+		return dims{}, err
+	}
+	w := int(buf[16])<<24 | int(buf[17])<<16 | int(buf[18])<<8 | int(buf[19])
+	h := int(buf[20])<<24 | int(buf[21])<<16 | int(buf[22])<<8 | int(buf[23])
+	return dims{w, h}, nil
+}
+
+// parseDetailPane extracts the precise address from the FindMy detail panel.
+// When the pin is clicked, FindMy shows a detail card on the right with:
+//   - Person name/email
+//   - Street address (e.g. "1 Rue de la Martinière, 91570 Bièvres")
+//   - "Position actuelle" / "Current Location"
+//   - Action buttons (Contacter, Itinéraire, etc.)
+//
+// Strategy: find the line just above "Position actuelle" (or its localized
+// equivalent), which is the street address. Fallback: pick the line that
+// looks most like an address (contains a postal code pattern).
+func parseDetailPane(lines []TextLine, person *Person, sidebarRightPx int) string {
+	personLower := strings.ToLower(person.Name)
+
+	// Collect lines from the detail panel (right side, x > sidebarRightPx).
+	type entry struct {
+		text string
+		y    int
+	}
+	var panel []entry
+
+	for _, l := range lines {
+		if l.X < sidebarRightPx {
+			continue
+		}
+		txt := strings.TrimSpace(l.Text)
+		if txt == "" {
+			continue
+		}
+		panel = append(panel, entry{text: txt, y: l.Y})
+	}
+
+	sort.SliceStable(panel, func(i, j int) bool { return panel[i].y < panel[j].y })
+
+	// Strategy 1: find the line just before "Position actuelle" / "Current Location".
+	currentLocLabels := []string{
+		"position actuelle", "current location", "posición actual",
+		"aktuelle position", "posizione attuale", "posição atual",
+		"現在地", "현재 위치", "当前位置", "текущая геопозиция",
+	}
+	for i, e := range panel {
+		lower := strings.ToLower(e.text)
+		for _, label := range currentLocLabels {
+			if strings.Contains(lower, label) {
+				// The address is the line just above this label.
+				if i > 0 {
+					addr := panel[i-1].text
+					// Skip if it's the person's name/email.
+					if !strings.Contains(strings.ToLower(addr), personLower) &&
+						!strings.Contains(addr, "@") && len(addr) > 5 {
+						return addr
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy 2: find a line that looks like a postal address.
+	// Postal codes: FR "91570", DE "12345", US "CA 90210", etc.
+	for _, e := range panel {
+		if strings.Contains(strings.ToLower(e.text), personLower) || strings.Contains(e.text, "@") {
+			continue
+		}
+		if looksLikeAddress(e.text) {
+			return e.text
+		}
+	}
+
+	return ""
+}
+
+// looksLikeAddress returns true if the text contains patterns typical of a
+// street address: a postal code (digit sequence of 4-5), or a comma-separated
+// city suffix.
+func looksLikeAddress(s string) bool {
+	digits := 0
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits++
+		} else {
+			if digits >= 4 && digits <= 5 {
+				return true
+			}
+			digits = 0
+		}
+	}
+	if digits >= 4 && digits <= 5 {
+		return true
+	}
+	return strings.Contains(s, ",") && len(s) > 10
 }

@@ -45,6 +45,7 @@ Flags:
 type runOpts struct {
 	json bool
 	keep bool
+	zoom bool
 }
 
 // parseOpts splits args into known flags and positional args. Go's flag
@@ -60,6 +61,8 @@ func parseOpts(args []string) (runOpts, []string) {
 			o.json = true
 		case "--keep", "-keep":
 			o.keep = true
+		case "--zoom", "-zoom":
+			o.zoom = true
 		default:
 			positional = append(positional, a)
 		}
@@ -150,11 +153,25 @@ func runPerson(args []string) {
 		os.Exit(1)
 	}
 
+	if opts.zoom {
+		detailShot := filepath.Join(tmpDir(), "detail.png")
+		defer cleanup(detailShot, opts.keep)
+		addr, err := findmy.DetailAddress(w, match, shot, detailShot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: zoom failed: %v\n", err)
+		} else if addr != "" {
+			match.Address = addr
+		}
+	}
+
 	if opts.json {
 		emitJSON(match)
 		return
 	}
 	fmt.Printf("%s\n  %s", match.Name, match.Location)
+	if match.Address != "" {
+		fmt.Printf("\n  %s", match.Address)
+	}
 	if match.Staleness != "" {
 		fmt.Printf("  (%s)", match.Staleness)
 	}
