@@ -114,6 +114,47 @@ func Activate() error {
 	return exec.Command("osascript", "-e", script).Run()
 }
 
+// hintDedicatedSpace prints a one-time hint if FindMy is on the current Space,
+// recommending the user move it to a dedicated Space for less disruption.
+func hintDedicatedSpace() {
+	ls := GetAppStrings()
+	out, err := runHelper("window", "--owner", ls.WindowOwner)
+	if err != nil {
+		return
+	}
+	var wins []Window
+	if err := json.Unmarshal(out, &wins); err != nil {
+		return
+	}
+	for _, w := range wins {
+		if w.Layer == 0 && w.Height > 100 && w.OnScreen {
+			fmt.Fprintf(os.Stderr, "hint: %s is on your current desktop. For less disruption, assign it to a dedicated Space:\n      right-click %s in Dock → Options → Assign To → Desktop on Display 2\n", ls.WindowOwner, ls.WindowOwner)
+			return
+		}
+	}
+}
+
+// rememberFrontApp returns the bundle identifier of the current frontmost app,
+// so we can restore focus after switching to FindMy's Space.
+func rememberFrontApp() string {
+	out, err := exec.Command("osascript", "-e",
+		`tell application "System Events" to get bundle identifier of first process whose frontmost is true`).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// restoreFrontApp reactivates a previously frontmost app by bundle identifier,
+// causing macOS to switch back to its Space automatically.
+func restoreFrontApp(bundleID string) {
+	if bundleID == "" || bundleID == "com.apple.findmy" {
+		return
+	}
+	_ = exec.Command("osascript", "-e",
+		fmt.Sprintf(`tell application id %q to activate`, bundleID)).Run()
+}
+
 func SwitchTab(name string) error {
 	ls := GetAppStrings()
 	script := fmt.Sprintf(
@@ -133,12 +174,25 @@ func MainWindow() (*Window, error) {
 	if err := json.Unmarshal(out, &wins); err != nil {
 		return nil, fmt.Errorf("decode windows: %w", err)
 	}
-	for _, w := range wins {
-		if w.Layer == 0 && w.OnScreen && w.Height > 100 {
-			return &w, nil
+	// Prefer on-screen windows, but accept off-screen (other Space) too.
+	// screencapture -l works across Spaces.
+	var best *Window
+	for i := range wins {
+		w := &wins[i]
+		if w.Layer != 0 || w.Height <= 100 {
+			continue
+		}
+		if w.OnScreen {
+			return w, nil // on-screen is ideal
+		}
+		if best == nil {
+			best = w // off-screen fallback (FindMy on another Space)
 		}
 	}
-	return nil, fmt.Errorf("no visible %s window (open the app first)", ls.WindowOwner)
+	if best != nil {
+		return best, nil
+	}
+	return nil, fmt.Errorf("no %s window found (open the app first)", ls.WindowOwner)
 }
 
 // Capture writes the FindMy window's content to dest using `screencapture -l`,
@@ -210,16 +264,18 @@ func wakeDisplay() {
 	}
 }
 
-// PreparePeople activates FindMy, raises it strictly frontmost (so the
-// People sidebar is fully painted into the bitmap captured by `screencapture
-// -l`), and selects the People tab via the View menu. Returns the window's
-// metadata for capture targeting. Fails fast if the host process is missing
-// the Screen Recording grant, rather than letting screencapture hang.
+// PreparePeople activates FindMy, selects the People tab, then switches back
+// to the user's original app/Space. screencapture -l works across Spaces so
+// the capture can happen after the switch-back. Returns the window metadata.
 func PreparePeople() (*Window, error) {
 	if err := requirePermissions(false); err != nil {
 		return nil, err
 	}
+
 	wakeDisplay()
+	hintDedicatedSpace()
+	previousApp := rememberFrontApp()
+
 	if err := Activate(); err != nil {
 		return nil, err
 	}
@@ -227,7 +283,13 @@ func PreparePeople() (*Window, error) {
 	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
 	_ = exec.Command("osascript", "-e", frontScript).Run()
 	_ = SwitchTab(GetAppStrings().PeopleTab)
-	time.Sleep(1100 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
+
+	// Switch back to the user's Space immediately. The People tab is already
+	// painted and screencapture -l will capture it across Spaces.
+	restoreFrontApp(previousApp)
+	time.Sleep(800 * time.Millisecond)
+
 	return MainWindow()
 }
 
@@ -356,6 +418,12 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 		return "", err
 	}
 
+	// --zoom requires clicks → must be on FindMy's Space.
+	previousApp := rememberFrontApp()
+	_ = Activate()
+	time.Sleep(500 * time.Millisecond)
+	defer restoreFrontApp(previousApp)
+
 	scale := computeScale(w, sidebarShot)
 	sidebarRightPx := int(340 * scale)
 
@@ -369,7 +437,6 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 
 	// Click the pin on the map to open the detail card. The pin is roughly
 	// centered in the map area after the sidebar click zooms to the person.
-	// FindMy sometimes needs two clicks: pin click → popup → second click → detail.
 	// We retry up to 3 times, checking OCR for the detail card after each attempt.
 	mapCenterX := w.X + int(float64(sidebarRightPx)/scale) + (w.Width-int(float64(sidebarRightPx)/scale))/2
 	mapCenterY := w.Y + w.Height/2
@@ -388,7 +455,6 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 		if addr := parseDetailPane(lines, person, sidebarRightPx); addr != "" {
 			return addr, nil
 		}
-		// Detail card not open yet — retry click.
 	}
 
 	return "", fmt.Errorf("detail card did not appear after 3 click attempts")
