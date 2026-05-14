@@ -264,9 +264,12 @@ func wakeDisplay() {
 	}
 }
 
-// PreparePeople activates FindMy, selects the People tab, then switches back
-// to the user's original app/Space. screencapture -l works across Spaces so
-// the capture can happen after the switch-back. Returns the window metadata.
+// PreparePeople activates FindMy on its Space, selects the People tab, and
+// returns the window metadata. The caller is responsible for capturing the
+// screenshot while FindMy is still frontmost — screencapture -l does NOT
+// work cross-Space on macOS Sequoia (the backing store is empty).
+//
+// Call RestoreUserSpace() after the capture to switch back.
 func PreparePeople() (*Window, error) {
 	if err := requirePermissions(false); err != nil {
 		return nil, err
@@ -274,7 +277,7 @@ func PreparePeople() (*Window, error) {
 
 	wakeDisplay()
 	hintDedicatedSpace()
-	previousApp := rememberFrontApp()
+	previousApp = rememberFrontApp()
 
 	if err := Activate(); err != nil {
 		return nil, err
@@ -283,14 +286,19 @@ func PreparePeople() (*Window, error) {
 	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
 	_ = exec.Command("osascript", "-e", frontScript).Run()
 	_ = SwitchTab(GetAppStrings().PeopleTab)
-	time.Sleep(500 * time.Millisecond)
-
-	// Switch back to the user's Space immediately. The People tab is already
-	// painted and screencapture -l will capture it across Spaces.
-	restoreFrontApp(previousApp)
-	time.Sleep(800 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 
 	return MainWindow()
+}
+
+// previousApp holds the bundle ID of the app that was frontmost before FindMy
+// was activated. Set by PreparePeople, used by RestoreUserSpace.
+var previousApp string
+
+// RestoreUserSpace switches back to the app/Space that was active before
+// PreparePeople was called.
+func RestoreUserSpace() {
+	restoreFrontApp(previousApp)
 }
 
 // ParsePeople groups OCR lines from the People sidebar into Person records.
@@ -419,10 +427,14 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 	}
 
 	// --zoom requires clicks → must be on FindMy's Space.
-	previousApp := rememberFrontApp()
+	// Ensure FindMy is frontmost and fully painted (Space switch needs time).
 	_ = Activate()
+	time.Sleep(1200 * time.Millisecond)
+	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
+	_ = exec.Command("osascript", "-e", frontScript).Run()
 	time.Sleep(500 * time.Millisecond)
-	defer restoreFrontApp(previousApp)
+	// Restore to the user's Space when done.
+	defer RestoreUserSpace()
 
 	scale := computeScale(w, sidebarShot)
 	sidebarRightPx := int(340 * scale)
@@ -531,7 +543,9 @@ func parseDetailPane(lines []TextLine, person *Person, sidebarRightPx int) strin
 	for i, e := range panel {
 		lower := strings.ToLower(e.text)
 		for _, label := range currentLocLabels {
-			if strings.Contains(lower, label) {
+			// Must be the label itself (e.g. "Position actuelle"), not embedded
+			// in another phrase (e.g. "Étiqueter la position actuelle").
+			if lower == label || strings.HasPrefix(lower, label) {
 				// The address is the line just above this label.
 				if i > 0 {
 					addr := panel[i-1].text

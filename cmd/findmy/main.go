@@ -84,6 +84,7 @@ func runPeople(args []string) {
 	must(err)
 	shot := filepath.Join(tmpDir(), "people.png")
 	must(findmy.Capture(w, shot))
+	findmy.RestoreUserSpace() // switch back after capture
 	defer cleanup(shot, opts.keep)
 
 	lines, err := findmy.OCR(shot)
@@ -125,6 +126,9 @@ func runPerson(args []string) {
 	must(err)
 	shot := filepath.Join(tmpDir(), "people.png")
 	must(findmy.Capture(w, shot))
+	if !opts.zoom {
+		findmy.RestoreUserSpace() // switch back early if no zoom needed
+	}
 	defer cleanup(shot, opts.keep)
 
 	lines, err := findmy.OCR(shot)
