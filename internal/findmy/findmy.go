@@ -276,9 +276,20 @@ func PreparePeople() (*Window, error) {
 	}
 
 	wakeDisplay()
+
+	// Check if FindMy is already on-screen (e.g. virtual display).
+	// If so, skip activation to avoid stealing focus / switching Spaces.
+	w, _ := MainWindow()
+	if w != nil && w.OnScreen {
+		// Window is on a visible display — just switch tab via menu.
+		_ = SwitchTab(GetAppStrings().PeopleTab)
+		time.Sleep(600 * time.Millisecond)
+		return MainWindow()
+	}
+
+	// Window is off-screen (other Space) or not open — activate.
 	hintDedicatedSpace()
 	previousApp = rememberFrontApp()
-
 	if err := Activate(); err != nil {
 		return nil, err
 	}
@@ -426,15 +437,18 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 		return "", err
 	}
 
-	// --zoom requires clicks → must be on FindMy's Space.
-	// Ensure FindMy is frontmost and fully painted (Space switch needs time).
-	_ = Activate()
-	time.Sleep(1200 * time.Millisecond)
-	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
-	_ = exec.Command("osascript", "-e", frontScript).Run()
-	time.Sleep(500 * time.Millisecond)
-	// Restore to the user's Space when done.
-	defer RestoreUserSpace()
+	// If FindMy is on a virtual display (onScreen but not the main display),
+	// CGEvent clicks work directly at its screen coordinates — no need to
+	// activate or switch Spaces. Only activate if the window is off-screen
+	// (on another Space).
+	if !w.OnScreen {
+		_ = Activate()
+		time.Sleep(1200 * time.Millisecond)
+		frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
+		_ = exec.Command("osascript", "-e", frontScript).Run()
+		time.Sleep(500 * time.Millisecond)
+		defer RestoreUserSpace()
+	}
 
 	scale := computeScale(w, sidebarShot)
 	sidebarRightPx := int(340 * scale)
@@ -447,16 +461,16 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 	}
 	time.Sleep(2 * time.Second)
 
-	// Click the pin on the map to open the detail card. The pin is roughly
-	// centered in the map area after the sidebar click zooms to the person.
-	// We retry up to 3 times, checking OCR for the detail card after each attempt.
+	// Step 1: Click the map center to hit the pin → shows a popup bubble.
 	mapCenterX := w.X + int(float64(sidebarRightPx)/scale) + (w.Width-int(float64(sidebarRightPx)/scale))/2
 	mapCenterY := w.Y + w.Height/2
+	_ = Click(mapCenterX, mapCenterY)
+	time.Sleep(1500 * time.Millisecond)
 
+	// Step 2: Capture, OCR, look for the popup bubble. If the detail card
+	// is already open (e.g. from a previous run), return the address.
+	// Otherwise, find the popup's (i) button and click it.
 	for attempt := 0; attempt < 3; attempt++ {
-		_ = Click(mapCenterX, mapCenterY)
-		time.Sleep(1500 * time.Millisecond)
-
 		if err := Capture(w, detailDest); err != nil {
 			return "", fmt.Errorf("detail capture: %w", err)
 		}
@@ -464,12 +478,59 @@ func DetailAddress(w *Window, person *Person, sidebarShot, detailDest string) (s
 		if err != nil {
 			return "", fmt.Errorf("detail ocr: %w", err)
 		}
+
+		// Check if detail card is already showing.
 		if addr := parseDetailPane(lines, person, sidebarRightPx); addr != "" {
 			return addr, nil
 		}
+
+		// Find the popup bubble and click to the right of it (the (i) button).
+		if clickX, clickY, ok := findPopupInfoButton(lines, person, w, sidebarRightPx, scale); ok {
+			_ = Click(clickX, clickY)
+		} else {
+			// No popup found — retry clicking the map center.
+			_ = Click(mapCenterX, mapCenterY)
+		}
+		time.Sleep(1500 * time.Millisecond)
 	}
 
-	return "", fmt.Errorf("detail card did not appear after 3 click attempts")
+	return "", fmt.Errorf("detail card did not appear after 3 attempts")
+}
+
+// findPopupInfoButton locates the (i) button in any FindMy popup bubble on
+// the map. The popup may show a different name than the target person (e.g.
+// "Moi" when pins overlap). We find the rightmost text in the map area and
+// click just past it, where the (i) button sits.
+func findPopupInfoButton(lines []TextLine, person *Person, w *Window, sidebarRightPx int, scale float64) (screenX, screenY int, found bool) {
+	// Find the text cluster in the map area that looks like a popup:
+	// small text lines outside the sidebar, not map labels (which are ALL-CAPS).
+	var bestLine TextLine
+	bestRight := 0
+	for _, l := range lines {
+		if l.X < sidebarRightPx {
+			continue
+		}
+		txt := strings.TrimSpace(l.Text)
+		if len(txt) < 3 || txt == "3D" || txt == "N" || txt == "+" {
+			continue
+		}
+		// Map labels are ALL-CAPS; popup text is mixed-case.
+		if txt == strings.ToUpper(txt) && len(txt) > 5 {
+			continue
+		}
+		right := l.X + l.Width
+		if right > bestRight {
+			bestRight = right
+			bestLine = l
+		}
+	}
+	if bestRight == 0 {
+		return 0, 0, false
+	}
+	// Click ~25px past the rightmost text edge (where the (i) sits).
+	imgX := bestRight + int(25*scale)
+	imgY := bestLine.Y + bestLine.Height/2
+	return w.X + int(float64(imgX)/scale), w.Y + int(float64(imgY)/scale), true
 }
 
 func computeScale(w *Window, imagePath string) float64 {
