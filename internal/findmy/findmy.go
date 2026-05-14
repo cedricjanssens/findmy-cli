@@ -112,15 +112,17 @@ func Activate() error {
 }
 
 func SwitchTab(name string) error {
+	ls := GetAppStrings()
 	script := fmt.Sprintf(
-		`tell application "System Events" to tell process "FindMy" to click menu item %q of menu "View" of menu bar 1`,
-		name,
+		`tell application "System Events" to tell process "FindMy" to click menu item %q of menu %q of menu bar 1`,
+		name, ls.ViewMenu,
 	)
 	return exec.Command("osascript", "-e", script).Run()
 }
 
 func MainWindow() (*Window, error) {
-	out, err := runHelper("window", "--owner", "Find My")
+	ls := GetAppStrings()
+	out, err := runHelper("window", "--owner", ls.WindowOwner)
 	if err != nil {
 		return nil, fmt.Errorf("helper window: %w", err)
 	}
@@ -133,7 +135,7 @@ func MainWindow() (*Window, error) {
 			return &w, nil
 		}
 	}
-	return nil, fmt.Errorf("no visible FindMy window (open the app first)")
+	return nil, fmt.Errorf("no visible %s window (open the app first)", ls.WindowOwner)
 }
 
 // Capture writes the FindMy window's content to dest using `screencapture -l`,
@@ -221,7 +223,7 @@ func PreparePeople() (*Window, error) {
 	time.Sleep(900 * time.Millisecond)
 	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
 	_ = exec.Command("osascript", "-e", frontScript).Run()
-	_ = SwitchTab("People")
+	_ = SwitchTab(GetAppStrings().PeopleTab)
 	time.Sleep(1100 * time.Millisecond)
 	return MainWindow()
 }
@@ -261,10 +263,7 @@ func ParsePeople(lines []TextLine, sidebarRightPx, textColMinPx int) []Person {
 	})
 	rows = mergeWrappedContinuations(rows)
 
-	skip := map[string]bool{
-		"People": true, "Devices": true, "Items": true,
-		"FaceTime": true, "Search": true, "+": true, "3D": true, "N": true,
-	}
+	skip := GetAppStrings().SkipWords()
 
 	var people []Person
 	var current *Person
@@ -316,8 +315,8 @@ func mergeWrappedContinuations(rows []TextLine) []TextLine {
 
 func looksLikeTimeSuffix(s string) bool {
 	t := strings.ToLower(strings.TrimSpace(s))
-	for _, suffix := range []string{"min. ago", "min ago", "hr. ago", "hr ago", "sec. ago", "sec ago", "day ago", "days ago", "week ago", "weeks ago", "month ago", "months ago", "year ago", "years ago", "ago"} {
-		if t == suffix || strings.HasSuffix(t, suffix) {
+	for _, pattern := range GetAppStrings().TimeSuffixes {
+		if t == pattern || strings.HasSuffix(t, pattern) || strings.Contains(t, pattern) {
 			return true
 		}
 	}
