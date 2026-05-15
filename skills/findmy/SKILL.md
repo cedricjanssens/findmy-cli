@@ -1,87 +1,56 @@
 ---
 name: findmy
 description: |
-  Query Find My friend locations on macOS. Returns name, coarse location,
-  staleness, and distance for everyone in the FindMy.app People sidebar.
-  Use when the user asks "where is X", "is X home", "how far is X", or
-  wants a location refresh for a friend. macOS only; requires the
-  display to be awake (the skill self-wakes via caffeinate) and Screen
-  Recording granted to the host process.
+  Query Find My locations and ring devices on macOS. People, devices, phone
+  ring, aliases. Supports 41 macOS display languages. Requires Screen
+  Recording + Accessibility permissions.
 ---
 
-# Find My Location Query
+# Find My
 
-Wraps the `findmy` CLI bundled with this plugin. The CLI drives FindMy.app:
-activates it, switches to the People tab, screencaptures the window, runs
-Vision OCR, and parses the sidebar.
+Wraps the `findmy` CLI bundled with this plugin. Drives FindMy.app via
+screen capture, Vision OCR, and CGEvent clicks.
 
 ## When to use
 
-- "Where is Omar?"
-- "Is Sarah home yet?"
-- "How far away is Mike?"
-- "Anyone near downtown?"
+- "Where is Omar?" / "Where is everyone?" → people/person lookup
+- "List my devices" → devices listing
+- "Find Christel's phone" / "Ring my iPhone" → phone ring
 
 ## Run
 
 ```bash
-# List everyone in the sidebar (default: human-readable table)
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" people
-
-# Same, as JSON — best for programmatic follow-up
+# People
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" people --json
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" person "Omar" --json
 
-# Lookup a single friend (name match is case-insensitive, substring OK)
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" person "Omar Shahine" --json
+# Devices
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" devices --json
+
+# Ring a device immediately (alias or full name)
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" phone Christel
+
+# Ring with dry-run safety
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" ring "iPhone14PM Christel"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" ring "iPhone14PM Christel" --confirm
 ```
 
-The wrapper auto-builds `bin/findmy` and `bin/findmy-helper` on first run via
-`make` (needs Go 1.22+ and Xcode Command Line Tools). Subsequent runs just
-exec the binary.
+Auto-builds on first run via `make` (Go 1.22+ + Xcode CLI Tools).
 
-## Output shape (JSON)
+## Caveats
 
-```json
-[
-  {
-    "name": "Omar Shahine",
-    "location": "Redmond, WA",
-    "staleness": "Paused",
-    "distance": "7 mi"
-  }
-]
-```
+- **`staleness: "Paused"`** — friend paused sharing, location is last known.
+- **`phone` and `ring --confirm`** play a loud sound on the target device.
+- **Focus steal**: ring commands raise FindMy and move the cursor.
+- **Back-to-back races**: space calls by ~5s.
+- **Display must be awake** for screencapture to work.
 
-- `name` — display name as shown in the FindMy sidebar
-- `location` — city, state (or device label when sharing from a device)
-- `staleness` — `"Now"`, `"X min. ago"`, `"X hr. ago"`, `"Paused"`, `""` (live)
-- `distance` — distance from this Mac if FindMy shows it (e.g. `"7 mi"`, `"1,971 mi"`)
+## Permissions (one-time)
 
-## Caveats — surface these when relevant
+- **Screen Recording** — for screencapture
+- **Accessibility** — for CGEvent clicks (ring, zoom)
 
-- **`staleness: "Paused"`** means the friend has paused location sharing. The
-  reported location is the last known position, possibly hours or days old.
-  Lead with this when reporting the result.
-- **Display sleep**: the CLI wakes the display via `caffeinate -u -t 3`
-  before each capture. If running on a truly headless Mac, ensure a display
-  (real or dummy USB-C plug) is attached — FindMy.app needs WindowServer
-  compositing.
-- **Focus steal**: each invocation briefly raises FindMy.app to the front.
-- **Back-to-back races**: two `findmy` invocations within ~5s can fail with
-  "could not create image from window" — space them out.
-- **No coordinates**: this is OCR of the sidebar text; lat/lon is not
-  available. Apple doesn't expose friend locations through any public API.
-
-## Permission requirements (one-time)
-
-Grant to the terminal emulator (or to the host process running this skill):
-
-- **Screen Recording** — System Settings → Privacy & Security → Screen Recording
-- **Accessibility** — only needed if a future version starts clicking rows
-  (not used today)
-
-After granting, **fully quit and relaunch** the host — TCC is read once at
-process start. The CLI's `findmy-helper permissions` subcommand can verify:
+Grant in System Settings → Privacy & Security, then restart the host process.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/findmy-helper" permissions

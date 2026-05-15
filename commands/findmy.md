@@ -1,47 +1,54 @@
 ---
-description: Look up Find My friend locations on macOS (name, location, staleness, distance) via Vision OCR of FindMy.app
-argument-hint: "[<name>]"
+description: Query Find My — people, devices, ring phones. Supports aliases and 41 languages.
+argument-hint: "[people | person <name> | devices | phone <device> | ring <device>]"
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh:*)
 ---
 
-# /findmy — Where is everyone?
+# /findmy
 
-Query Find My via the bundled `findmy` CLI. With no arguments, returns
-every friend in the FindMy.app People sidebar. With a name argument,
-returns just that friend (case-insensitive substring match).
+Query Find My via the bundled `findmy` CLI.
 
 ## Run
 
-If `$ARGUMENTS` is empty:
+Based on `$ARGUMENTS`:
 
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" people --json
-```
+- Empty or `people`:
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" people --json
+  ```
 
-Otherwise:
+- `person <name>`:
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" person "<name>" --json
+  ```
 
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" person "$ARGUMENTS" --json
-```
+- `devices`:
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" devices --json
+  ```
 
-## How to report results to the user
+- `phone <device>` (rings immediately):
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" phone "<device>"
+  ```
 
-- Lead with the friend's **name**, **location**, and **distance** when known.
-- If `staleness` is `"Paused"`, **say so up front** — the location is the
-  last known position, not live. Example: "Omar paused location sharing;
-  last known position was Redmond, WA (7 mi away)."
-- If `staleness` is a time string like `"5 min. ago"`, mention it
-  inline: "Omar is in Redmond, WA — updated 5 min ago."
-- If `staleness` is empty/missing, treat the location as live.
-- For multi-person output, sort by name and present as a short list.
-- For `person <name>` lookups that return "no person matching", say so
-  plainly and offer to list everyone with `/findmy` (no args).
+- `ring <device>` (dry-run, add --confirm to ring):
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/findmy.sh" ring "<device>"
+  ```
 
-## Caveats to surface only when relevant
+If `$ARGUMENTS` is a single name that doesn't match a subcommand, treat
+it as `person <name>`.
 
-- This raises FindMy.app to the front briefly during the lookup.
-- On a headless Mac, the display must be awake (the CLI nudges it via
-  `caffeinate -u`, but a real or dummy USB-C display must be attached).
-- Two `/findmy` invocations within ~5s can fail with "could not create
-  image from window" — wait a few seconds and retry.
-- The CLI reads UI text, not coordinates. No lat/lon is available.
+## How to report results
+
+- Lead with **name**, **location**, **distance**.
+- `staleness: "Paused"` → say so up front, location is last known.
+- `phone` → confirm the device rang or report the error.
+- For multi-person/device output, sort by name.
+
+## Caveats
+
+- `phone` and `ring --confirm` play a loud sound on the target device.
+- Focus steal during ring/phone commands.
+- Back-to-back calls within ~5s can fail — space them out.

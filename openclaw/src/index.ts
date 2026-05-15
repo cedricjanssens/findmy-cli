@@ -1,8 +1,8 @@
 /**
  * OpenClaw plugin entry for findmy-cli.
  *
- * Registers two tools that shell out to the `findmy` binary to query Find My
- * friend locations on macOS. The CLI drives FindMy.app via screen capture
+ * Registers tools that shell out to the `findmy` binary to query Find My
+ * friend/device locations and ring devices on macOS. The CLI drives FindMy.app via screen capture
  * and Vision OCR — see the host repo for the underlying mechanism.
  *
  * Security posture:
@@ -79,6 +79,46 @@ const TOOLS: ToolDef[] = [
 		}),
 		buildArgs: (params) => ['person', validateName(params.name), '--json'],
 	},
+	{
+		name: 'findmy_devices',
+		description:
+			'List all devices in FindMy.app Devices tab (yours + family sharing). Returns name, location, status, and group for each device. Use for "list my devices", "where is my iPhone", "show family devices".',
+		parameters: Type.Object({}),
+		buildArgs: () => ['devices', '--json'],
+	},
+	{
+		name: 'findmy_phone',
+		description:
+			'Find a device and make it play a loud sound immediately. Accepts a device name or alias (e.g. "Christel" if aliased to "iPhone14PM Christel"). Use for "find my phone", "ring Christel\'s iPhone", "make X\'s phone ring". WARNING: this will play a loud sound on the target device.',
+		parameters: Type.Object({
+			device: Type.String({
+				description: 'Device name, substring, or alias (case-insensitive).',
+				maxLength: MAX_NAME_LENGTH,
+			}),
+		}),
+		buildArgs: (params) => ['phone', validateName(params.device)],
+	},
+	{
+		name: 'findmy_ring',
+		description:
+			'Ring a device with dry-run safety. Without confirm=true, locates the "Play Sound" button but does not click it. Use when you want to verify the device is found before ringing.',
+		parameters: Type.Object({
+			device: Type.String({
+				description: 'Device name, substring, or alias (case-insensitive).',
+				maxLength: MAX_NAME_LENGTH,
+			}),
+			confirm: Type.Optional(
+				Type.Boolean({
+					description: 'Set to true to actually play the sound. Default: false (dry-run).',
+				})
+			),
+		}),
+		buildArgs: (params) => {
+			const args = ['ring', validateName(params.device)];
+			if (params.confirm) args.push('--confirm');
+			return args;
+		},
+	},
 ];
 
 function toolResult(text: string) {
@@ -127,7 +167,7 @@ function resolveCliPath(config?: PluginConfig): string {
 export default definePluginEntry({
 	id: 'findmy-cli',
 	name: 'Find My',
-	description: 'Query Find My friend locations on macOS via UI scraping',
+	description: 'Query Find My friend/device locations and ring devices on macOS via UI scraping',
 
 	register(api) {
 		const config = api.pluginConfig as PluginConfig | undefined;
