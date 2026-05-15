@@ -22,7 +22,23 @@ $(HELPER_BIN): $(HELPER_SRC)
 
 $(FACE_BIN): $(FACE_SRC)
 	@mkdir -p $(BIN)
-	swiftc -O -framework AVFoundation -o $@ $<
+	swiftc -O -framework AVFoundation -framework CoreML -o $@ $<
+
+# Install AdaFace IR-18 Core ML model (~42 MB download, ~48 MB extracted)
+FACE_MODEL_DIR := /opt/homebrew/share/face-detect
+FACE_MODEL_URL := https://github.com/john-rocky/CoreML-Models/releases/download/adaface-v1/AdaFace_IR18.mlpackage.zip
+
+face-detect-model:
+	@if [ -d "$(FACE_MODEL_DIR)/AdaFace_IR18.mlpackage" ]; then \
+		echo "Model already installed at $(FACE_MODEL_DIR)"; \
+	else \
+		echo "Downloading AdaFace IR-18..."; \
+		mkdir -p $(FACE_MODEL_DIR); \
+		curl -fL --output /tmp/AdaFace_IR18.mlpackage.zip $(FACE_MODEL_URL); \
+		cd $(FACE_MODEL_DIR) && unzip -q -o /tmp/AdaFace_IR18.mlpackage.zip; \
+		rm /tmp/AdaFace_IR18.mlpackage.zip; \
+		echo "Model installed at $(FACE_MODEL_DIR)/AdaFace_IR18.mlpackage"; \
+	fi
 
 $(GO_BIN): $(shell find cmd internal -name '*.go') go.mod
 	@mkdir -p $(BIN)
@@ -31,7 +47,7 @@ $(GO_BIN): $(shell find cmd internal -name '*.go') go.mod
 clean:
 	rm -rf $(BIN)
 
-install: build $(FACE_BIN)
+install: build $(FACE_BIN) face-detect-model
 	cp $(GO_BIN) $(HELPER_BIN) $(FACE_BIN) /usr/local/bin/
 
 # Reinstall over Homebrew without sudo. Run `make claim` once first.
