@@ -1,10 +1,15 @@
 # findmy-cli
 
-Read your Find My friends' locations from the macOS FindMy.app via UI scraping.
-Apple does not expose a public API for friend locations and the on-disk caches
-are encrypted with keychain-bound keys, so this tool drives the GUI: it
-activates FindMy.app, switches to the People tab, screenshots the window, and
-runs Vision OCR on the result.
+Query Apple's Find My from the command line via UI scraping.
+
+Apple does not expose a public API for friend or device locations and the
+on-disk caches are encrypted with keychain-bound keys, so this tool drives the
+GUI: it activates FindMy.app, switches to the appropriate tab, screenshots the
+window, and runs Vision OCR on the result.
+
+Supports **41 macOS display languages** out of the box (English, French, German,
+Japanese, etc.) — the locale layer auto-detects your system language and maps
+menu names accordingly.
 
 ## Why a Go CLI plus a Swift helper
 
@@ -60,15 +65,45 @@ Requirements:
 
 ## Usage
 
-```
+```bash
 # List people in the sidebar with coarse location, staleness, distance.
 findmy people
 findmy people --json
 
 # Click a row and OCR the detail pane (precise address).
-findmy person "Omar Shahine"
-findmy person "Omar Shahine" --json
+findmy person "cedric.janssens@gmail.com" --zoom --json
+
+# List all devices (yours + family sharing).
+findmy devices --json
+
+# Ring a device immediately (finds it and plays a sound).
+findmy phone "iPhone14PM Christel"
+
+# Or use an alias for convenience:
+findmy alias Christel "iPhone14PM Christel"
+findmy phone Christel
+
+# Ring with dry-run first (locates the button without clicking).
+findmy ring "iPhone14PM Christel"
+findmy ring "iPhone14PM Christel" --confirm
+
+# Manage aliases.
+findmy alias                          # list all
+findmy alias Maman "iPhone14PM Christel"  # add/update
+findmy alias --delete Maman           # remove
 ```
+
+Aliases are stored in `~/.config/findmy-cli/aliases.json` and work with both
+`phone` and `ring` commands.
+
+### Environment check
+
+```bash
+findmy-helper setup-check
+```
+
+Verifies TCC permissions (Screen Recording, Accessibility), display status,
+and FindMy.app availability.
 
 ## Required macOS permissions
 
@@ -146,19 +181,43 @@ diagnostic — TCC denied is more common than missing display.
 - Window position is re-queried on every run; the app does not need to be at a
   fixed location.
 - This brings FindMy.app to the foreground and steals focus during a click.
+  Using a virtual display (see below) avoids visual disruption for read-only
+  commands; `phone` and `ring` always need to click and will move the cursor.
 - Apple's TOS may consider GUI scraping out of scope. Use at your own risk.
+
+## Locale support
+
+The CLI auto-detects your macOS display language via `defaults read .GlobalPreferences AppleLocale` and maps localized menu names (View, People, Devices, etc.) accordingly. 41 languages are supported.
+
+To override auto-detection:
+
+```bash
+export FINDMY_LANG=fr   # force French
+findmy people --json
+```
+
+To discover menu names for a new locale:
+
+```bash
+osascript -e 'tell application "System Events" to tell process "FindMy" to get name of every menu bar item of menu bar 1'
+```
+
+Then add an entry to `localeTable` in `internal/findmy/locale.go`.
 
 ## Layout
 
 ```
-cmd/findmy/                     Go CLI
-internal/findmy/                Orchestration + sidebar parser
-helpers/findmy-helper/main.swift  window + ocr + click subcommands
-bin/                            Build outputs
-.claude-plugin/plugin.json      Claude Code / OpenClaw plugin manifest
-commands/findmy.md              /findmy slash command
-skills/findmy/SKILL.md          Auto-triggering skill
-scripts/findmy.sh               Plugin wrapper (auto-builds on first use)
+cmd/findmy/                       Go CLI (people, person, devices, phone, ring, alias)
+internal/findmy/findmy.go         Orchestration, sidebar parser, ring logic
+internal/findmy/locale.go         Locale detection + 41-language string table
+internal/findmy/aliases.go        Device alias resolution (~/.config/findmy-cli/aliases.json)
+helpers/findmy-helper/main.swift  window + ocr + click + setup-check subcommands
+bin/                              Build outputs
+scripts/                          Benchmarks, service optimization scripts
+.claude-plugin/plugin.json        Claude Code / OpenClaw plugin manifest
+commands/findmy.md                /findmy slash command
+skills/findmy/SKILL.md            Auto-triggering skill
+scripts/findmy.sh                 Plugin wrapper (auto-builds on first use)
 ```
 
 ## Plugin surfaces
