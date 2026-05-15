@@ -936,12 +936,15 @@ func RingDevice(w *Window, device *Device, tmpDir string, dryRun bool) error {
 	mapCenterY := w.Y + w.Height/2
 
 	// Retry loop: click map center, capture, check for "Play Sound" button.
+	// Use up to 5 attempts with progressive delays — the detail card sometimes
+	// needs more time to open, especially when the pin is animated to position.
 	var buttonLine *TextLine
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
+		// Click pin → popup; click again → detail card.
 		_ = Click(mapCenterX, mapCenterY)
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(time.Duration(1200+attempt*300) * time.Millisecond)
 		_ = Click(mapCenterX, mapCenterY)
-		time.Sleep(1500 * time.Millisecond)
+		time.Sleep(time.Duration(1500+attempt*500) * time.Millisecond)
 
 		// Capture and OCR the detail card to find "Émettre un son".
 		shot := filepath.Join(tmpDir, "ring-detail.png")
@@ -977,7 +980,7 @@ func RingDevice(w *Window, device *Device, tmpDir string, dryRun bool) error {
 	}
 
 	if buttonLine == nil {
-		return fmt.Errorf("'Play Sound' button not found after 3 attempts (device may be offline)")
+		return fmt.Errorf("'Play Sound' button not found after 5 attempts (device may be offline)")
 	}
 
 	// Click the button.
