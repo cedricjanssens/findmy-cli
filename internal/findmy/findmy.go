@@ -540,6 +540,18 @@ func findPopupInfoButton(lines []TextLine, person *Person, w *Window, sidebarRig
 	return w.X + int(float64(imgX)/scale), w.Y + int(float64(imgY)/scale), true
 }
 
+// computeScaleFromWindow takes a quick screenshot of the window to determine
+// the image-to-screen scale factor. This handles both @1x (virtual display)
+// and @2x (Retina) transparently.
+func computeScaleFromWindow(w *Window, tmpDir string) float64 {
+	probe := filepath.Join(tmpDir, "scale-probe.png")
+	if err := Capture(w, probe); err != nil {
+		return 2.0
+	}
+	defer os.Remove(probe)
+	return computeScale(w, probe)
+}
+
 func computeScale(w *Window, imagePath string) float64 {
 	scale := 2.0
 	if info, err := imageSize(imagePath); err == nil && w.Width > 0 {
@@ -702,7 +714,8 @@ func PrepareDevices() (*Window, error) {
 // It scrolls through the sidebar to find all devices, including those
 // off-screen. Returns all found devices.
 func ScanDevices(w *Window, tmpDir string) ([]Device, error) {
-	scale := 1.0
+	// All coordinates derived from window geometry — never hardcoded.
+	scale := computeScaleFromWindow(w, tmpDir)
 	sidebarRightPx := int(340 * scale)
 	textColMinPx := int(50 * scale)
 	topMarginPx := int(90 * scale)
@@ -710,11 +723,12 @@ func ScanDevices(w *Window, tmpDir string) ([]Device, error) {
 	var allDevices []Device
 	seen := map[string]bool{}
 
-	// Scroll position in the sidebar
-	sidebarX := w.X + 150
+	// Scroll target: center of the sidebar area (window-relative).
+	sidebarX := w.X + int(170*scale/scale) // 170pt into the sidebar
 	sidebarY := w.Y + w.Height/2
 
-	for scrollPass := 0; scrollPass < 6; scrollPass++ {
+	emptyPasses := 0
+	for scrollPass := 0; scrollPass < 15; scrollPass++ {
 		shot := filepath.Join(tmpDir, fmt.Sprintf("devices_%d.png", scrollPass))
 		if err := Capture(w, shot); err != nil {
 			return allDevices, fmt.Errorf("capture devices: %w", err)
@@ -735,14 +749,18 @@ func ScanDevices(w *Window, tmpDir string) ([]Device, error) {
 			}
 		}
 
-		// If no new devices found, we've reached the end.
-		if newCount == 0 && scrollPass > 0 {
-			break
+		if newCount == 0 {
+			emptyPasses++
+			if emptyPasses >= 3 {
+				break // 3 consecutive empty passes → reached the end
+			}
+		} else {
+			emptyPasses = 0
 		}
 
-		// Scroll down in the sidebar.
-		_ = Scroll(sidebarX, sidebarY, -5)
-		time.Sleep(600 * time.Millisecond)
+		// Scroll down aggressively in the sidebar.
+		_ = Scroll(sidebarX, sidebarY, -8)
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	return allDevices, nil
@@ -831,6 +849,58 @@ func parseDeviceSidebar(lines []TextLine, sidebarRightPx, textColMinPx, topMargi
 	return devices
 }
 
+// FindDeviceByScroll scrolls through the Devices sidebar looking for a device
+// whose name contains the target string. Returns the device with its current
+// on-screen coordinates (ready for clicking). This is more reliable than a
+// two-phase scan+scroll because coordinates are captured in the same position.
+func FindDeviceByScroll(w *Window, target, tmpDir string) (*Device, error) {
+	targetLower := strings.ToLower(target)
+	scale := computeScaleFromWindow(w, tmpDir)
+	sidebarRightPx := int(340 * scale)
+
+	sidebarX := w.X + 170 // center of sidebar in screen points
+	sidebarY := w.Y + w.Height/2
+
+	// Scroll to top first.
+	for i := 0; i < 20; i++ {
+		_ = Scroll(sidebarX, sidebarY, 10)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Scroll down, OCR each frame, look for the target.
+	for pass := 0; pass < 20; pass++ {
+		shot := filepath.Join(tmpDir, "scroll-find.png")
+		if err := Capture(w, shot); err != nil {
+			return nil, fmt.Errorf("capture: %w", err)
+		}
+		lines, err := OCR(shot)
+		if err != nil {
+			_ = os.Remove(shot)
+			return nil, fmt.Errorf("ocr: %w", err)
+		}
+		_ = os.Remove(shot)
+
+		for _, l := range lines {
+			if l.X+l.Width/2 >= sidebarRightPx {
+				continue // not in sidebar
+			}
+			txt := strings.TrimSpace(l.Text)
+			if strings.Contains(strings.ToLower(txt), targetLower) {
+				return &Device{
+					Name:  txt,
+					NameY: l.Y,
+					NameX: l.X,
+				}, nil
+			}
+		}
+
+		_ = Scroll(sidebarX, sidebarY, -5)
+		time.Sleep(400 * time.Millisecond)
+	}
+
+	return nil, fmt.Errorf("device %q not found after scrolling through entire list", target)
+}
+
 // RingDevice clicks on a device in the Devices sidebar, opens its detail card
 // on the map, finds the "Émettre un son" / "Play Sound" button, and clicks it.
 //
@@ -841,69 +911,73 @@ func RingDevice(w *Window, device *Device, tmpDir string, dryRun bool) error {
 	}
 
 	// Activate FindMy (needed for Devices tab clicks).
-	needRestore := false
-	if !w.OnScreen {
-		previousApp = rememberFrontApp()
-		needRestore = true
-	}
 	_ = Activate()
-	time.Sleep(800 * time.Millisecond)
-	if needRestore {
-		defer RestoreUserSpace()
-	}
+	time.Sleep(1200 * time.Millisecond)
+	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
+	_ = exec.Command("osascript", "-e", frontScript).Run()
+	time.Sleep(500 * time.Millisecond)
+	defer RestoreUserSpace()
 
-	scale := 1.0 // virtual display = 1x
+	scale := computeScaleFromWindow(w, tmpDir)
 
-	// Click the device in the sidebar.
+	// Click the device in the sidebar. FindMy will zoom to its location.
 	screenX := w.X + int(float64(device.NameX)/scale)
 	screenY := w.Y + int(float64(device.NameY)/scale) + 8
 	if err := Click(screenX, screenY); err != nil {
 		return fmt.Errorf("click device: %w", err)
 	}
-	time.Sleep(2 * time.Second)
+	// Wait longer for the zoom animation to complete (may fetch location).
+	time.Sleep(3 * time.Second)
 
-	// Double-click the map pin (center of map area) to open the detail card.
-	sidebarWidth := int(340 * scale)
-	mapCenterX := w.X + sidebarWidth + (w.Width-sidebarWidth)/2
+	// The pin should now be centered on the map. Click it to show the popup,
+	// then click again to open the detail card.
+	sidebarPts := 340 // sidebar width in points (constant)
+	mapCenterX := w.X + sidebarPts + (w.Width-sidebarPts)/2
 	mapCenterY := w.Y + w.Height/2
-	_ = Click(mapCenterX, mapCenterY)
-	time.Sleep(1000 * time.Millisecond)
-	_ = Click(mapCenterX, mapCenterY)
-	time.Sleep(1500 * time.Millisecond)
 
-	// Capture and OCR the detail card to find "Émettre un son" / "Play Sound".
-	shot := filepath.Join(tmpDir, "ring-detail.png")
-	if err := Capture(w, shot); err != nil {
-		return fmt.Errorf("capture ring detail: %w", err)
-	}
-	lines, err := OCR(shot)
-	if err != nil {
-		return fmt.Errorf("ocr ring detail: %w", err)
-	}
-
-	// Find the "Play Sound" button.
-	playSoundLabels := []string{
-		"émettre un son", "play sound", "ton abspielen",
-		"reproducir sonido", "riproduci suono", "emitir som",
-		"サウンドを再生", "사운드 재생", "播放声音",
-	}
-
+	// Retry loop: click map center, capture, check for "Play Sound" button.
 	var buttonLine *TextLine
-	for i, l := range lines {
-		lower := strings.ToLower(strings.TrimSpace(l.Text))
-		for _, label := range playSoundLabels {
-			if strings.Contains(lower, label) {
-				buttonLine = &lines[i]
+	for attempt := 0; attempt < 3; attempt++ {
+		_ = Click(mapCenterX, mapCenterY)
+		time.Sleep(1200 * time.Millisecond)
+		_ = Click(mapCenterX, mapCenterY)
+		time.Sleep(1500 * time.Millisecond)
+
+		// Capture and OCR the detail card to find "Émettre un son".
+		shot := filepath.Join(tmpDir, "ring-detail.png")
+		if err := Capture(w, shot); err != nil {
+			return fmt.Errorf("capture ring detail: %w", err)
+		}
+		lines, err := OCR(shot)
+		if err != nil {
+			return fmt.Errorf("ocr ring detail: %w", err)
+		}
+
+		playSoundLabels := []string{
+			"émettre un son", "emettre un son", "play sound", "ton abspielen",
+			"reproducir sonido", "riproduci suono", "emitir som",
+		}
+
+		for i, l := range lines {
+			lower := strings.ToLower(strings.TrimSpace(l.Text))
+			for _, label := range playSoundLabels {
+				if strings.Contains(lower, label) {
+					buttonLine = &lines[i]
+					break
+				}
+			}
+			if buttonLine != nil {
 				break
 			}
 		}
 		if buttonLine != nil {
 			break
 		}
+		// Detail card not open yet — retry.
 	}
 
 	if buttonLine == nil {
-		return fmt.Errorf("'Play Sound' button not found in detail card (device may be offline)")
+		return fmt.Errorf("'Play Sound' button not found after 3 attempts (device may be offline)")
 	}
 
 	// Click the button.

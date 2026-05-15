@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/oshahine/findmy-cli/internal/findmy"
 )
@@ -288,72 +287,14 @@ func runRing(args []string) {
 	w, err := findmy.PrepareDevices()
 	must(err)
 
-	devices, err := findmy.ScanDevices(w, tmpDir())
-	must(err)
-
-	// Find matching device.
-	var match *findmy.Device
-	for i := range devices {
-		if strings.EqualFold(strings.TrimSpace(devices[i].Name), target) {
-			match = &devices[i]
-			break
-		}
-	}
-	if match == nil {
-		for i := range devices {
-			if strings.Contains(strings.ToLower(devices[i].Name), target) {
-				match = &devices[i]
-				break
-			}
-		}
-	}
-	if match == nil {
-		fmt.Fprintf(os.Stderr, "no device matching %q\navailable devices:\n", target)
-		for _, d := range devices {
-			fmt.Fprintf(os.Stderr, "  %s\n", d.Name)
-		}
+	// Single-pass: scroll through the sidebar looking for the target device.
+	// No pre-scan — just scroll and OCR until found or exhausted.
+	match, err := findmy.FindDeviceByScroll(w, target, tmpDir())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
 	fmt.Fprintf(os.Stderr, "Found: %s\n", match.Name)
-
-	// We need the device to be visible in the sidebar for the click.
-	// Scroll back to top first, then scroll until we find it.
-	sidebarX := w.X + 150
-	sidebarY := w.Y + w.Height/2
-	for i := 0; i < 10; i++ {
-		_ = findmy.Scroll(sidebarX, sidebarY, 5) // scroll up
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	// Now scroll down and look for the device, refreshing its Y position.
-	found := false
-	for scrollPass := 0; scrollPass < 10; scrollPass++ {
-		shot := filepath.Join(tmpDir(), "ring-scan.png")
-		_ = findmy.Capture(w, shot)
-		lines, _ := findmy.OCR(shot)
-		_ = os.Remove(shot)
-
-		for _, l := range lines {
-			if strings.Contains(strings.ToLower(l.Text), strings.ToLower(match.Name)) ||
-				strings.Contains(strings.ToLower(match.Name), strings.ToLower(strings.TrimSpace(l.Text))) {
-				match.NameY = l.Y
-				match.NameX = l.X
-				found = true
-				break
-			}
-		}
-		if found {
-			break
-		}
-		_ = findmy.Scroll(sidebarX, sidebarY, -3)
-		time.Sleep(400 * time.Millisecond)
-	}
-
-	if !found {
-		fmt.Fprintf(os.Stderr, "error: could not scroll to %q in sidebar\n", match.Name)
-		os.Exit(1)
-	}
 
 	dryRun := !opts.confirm
 	if err := findmy.RingDevice(w, match, tmpDir(), dryRun); err != nil {

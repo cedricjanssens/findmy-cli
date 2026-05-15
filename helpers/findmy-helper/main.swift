@@ -115,18 +115,69 @@ func cmdClick(_ args: [String]) {
     print("{\"ok\":true}")
 }
 
+func cmdDrag(_ args: [String]) {
+    guard args.count >= 4, let x1 = Double(args[0]), let y1 = Double(args[1]),
+          let x2 = Double(args[2]), let y2 = Double(args[3]) else {
+        die("usage: findmy-helper drag <x1> <y1> <x2> <y2>")
+    }
+    let src = CGEventSource(stateID: .hidSystemState)
+    let from = CGPoint(x: x1, y: y1)
+    let to = CGPoint(x: x2, y: y2)
+    let steps = 10
+    let dx = (x2 - x1) / Double(steps)
+    let dy = (y2 - y1) / Double(steps)
+
+    // Mouse down at start
+    let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: from, mouseButton: .left)
+    down?.post(tap: .cghidEventTap)
+    usleep(50_000)
+
+    // Drag in steps
+    for i in 1...steps {
+        let pt = CGPoint(x: x1 + dx * Double(i), y: y1 + dy * Double(i))
+        let drag = CGEvent(mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: pt, mouseButton: .left)
+        drag?.post(tap: .cghidEventTap)
+        usleep(20_000)
+    }
+
+    // Mouse up at end
+    let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: to, mouseButton: .left)
+    up?.post(tap: .cghidEventTap)
+    print("{\"ok\":true}")
+}
+
 func cmdScroll(_ args: [String]) {
     guard args.count >= 3, let x = Double(args[0]), let y = Double(args[1]), let dy = Int32(args[2]) else {
         die("usage: findmy-helper scroll <x> <y> <dy> (dy: negative=down, positive=up)")
     }
     let pt = CGPoint(x: x, y: y)
     let src = CGEventSource(stateID: .hidSystemState)
-    // Move mouse to position first (scroll targets the window under cursor).
+
+    // Move mouse to target position.
     let move = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: pt, mouseButton: .left)
     move?.post(tap: .cghidEventTap)
-    usleep(50_000)
-    let scroll = CGEvent(scrollWheelEvent2Source: src, units: .line, wheelCount: 1, wheel1: dy, wheel2: 0, wheel3: 0)
-    scroll?.post(tap: .cghidEventTap)
+    usleep(100_000)
+
+    // Catalyst apps (like FindMy) need continuous gesture scroll, not discrete
+    // scroll wheel. We simulate a trackpad scroll gesture with phase events.
+    let pixelDy = Double(dy) * 30.0
+    let steps = 5
+    let stepDy = pixelDy / Double(steps)
+
+    for i in 0..<steps {
+        let scroll = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1, wheel1: Int32(stepDy), wheel2: 0, wheel3: 0)
+        // Set scroll phase: 1=began, 2=changed, 4=ended
+        if i == 0 {
+            scroll?.setIntegerValueField(.scrollWheelEventScrollPhase, value: 1) // kCGScrollPhaseBegan
+        } else if i == steps - 1 {
+            scroll?.setIntegerValueField(.scrollWheelEventScrollPhase, value: 4) // kCGScrollPhaseEnded
+        } else {
+            scroll?.setIntegerValueField(.scrollWheelEventScrollPhase, value: 2) // kCGScrollPhaseChanged
+        }
+        scroll?.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        scroll?.post(tap: .cghidEventTap)
+        usleep(20_000)
+    }
     print("{\"ok\":true}")
 }
 
@@ -168,6 +219,7 @@ switch sub {
 case "window": cmdWindow(rest)
 case "ocr": cmdOCR(rest)
 case "click": cmdClick(rest)
+case "drag": cmdDrag(rest)
 case "scroll": cmdScroll(rest)
 case "permissions": cmdPermissions(rest)
 default: die("unknown subcommand: \(sub)")
