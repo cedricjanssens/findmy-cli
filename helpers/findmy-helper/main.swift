@@ -210,9 +210,103 @@ func cmdPermissions(_ args: [String]) {
     emit(Permissions(screenRecording: screenRecording, accessibility: accessibility))
 }
 
+// SetupCheck reports both REQUIRED conditions (permissions) and OPTIMAL but
+// optional conditions (virtual display, dedicated user session) along with
+// human-readable recommendations explaining WHY each matters.
+struct OptimalCondition: Encodable {
+    let ok: Bool
+    let detail: String
+    let recommendation: String
+}
+
+struct SetupCheck: Encodable {
+    let permissions: Permissions
+    let optimal: [String: OptimalCondition]
+}
+
+// detectVirtualDisplay returns true when a secondary display is connected
+// that is NOT the built-in / primary display — typically a BetterDisplay
+// dummy display, a hardware HDMI/USB-C dummy plug, or a real external
+// monitor that FindMy can live on without disturbing the main workspace.
+func detectVirtualDisplay() -> (ok: Bool, detail: String) {
+    var displayCount: UInt32 = 0
+    CGGetActiveDisplayList(0, nil, &displayCount)
+    if displayCount <= 1 {
+        return (false, "only one display detected")
+    }
+    return (true, "\(displayCount) displays detected — FindMy can run on a non-primary one")
+}
+
+// detectDedicatedSession heuristically reports whether this helper appears
+// to be running in a session OTHER than the primary user's interactive one.
+// We compare the process owner to the console user (the one currently
+// interacting at the physical keyboard/screen).
+func detectDedicatedSession() -> (ok: Bool, detail: String) {
+    let runningUser = NSUserName()
+    // Use stat on /dev/console — its owner is the active console user.
+    var st = stat()
+    if stat("/dev/console", &st) == 0 {
+        if let pw = getpwuid(st.st_uid), let name = pw.pointee.pw_name {
+            let consoleName = String(cString: name)
+            if consoleName != runningUser {
+                return (true, "running as '\(runningUser)', console is '\(consoleName)'")
+            }
+            return (false, "running as the active console user '\(runningUser)' — clicks will share the cursor")
+        }
+    }
+    return (false, "could not determine console user (running as '\(runningUser)')")
+}
+
+// cmdSetupCheck reports both required permissions AND optimal optional
+// conditions for zero-disruption operation. The output is JSON for parsing
+// and the CLI's --help embeds the recommendations.
+func cmdSetupCheck(_ args: [String]) {
+    // Required: permissions
+    var screenRecording = CGPreflightScreenCaptureAccess()
+    if !screenRecording {
+        let sem = DispatchSemaphore(value: 0)
+        SCShareableContent.getWithCompletionHandler { content, err in
+            screenRecording = (content != nil && err == nil)
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 3.0)
+    }
+    let accessibility: Bool
+    if #available(macOS 14.0, *) {
+        accessibility = CGPreflightPostEventAccess()
+    } else {
+        accessibility = AXIsProcessTrusted()
+    }
+
+    // Optimal: virtual display
+    let (vdOk, vdDetail) = detectVirtualDisplay()
+    let vdRec = """
+        Run FindMy on a non-primary display (BetterDisplay virtual screen, or a hardware HDMI/USB-C dummy plug). \
+        screencapture -l works across displays, so basic queries (people, person, devices) become invisible — \
+        no flicker, no Space switching. Install BetterDisplay: brew install --cask betterdisplay
+        """
+
+    // Optimal: dedicated session
+    let (dsOk, dsDetail) = detectDedicatedSession()
+    let dsRec = """
+        Run findmy-cli from a dedicated macOS user session via Fast User Switching, exposed remotely (HTTP/MCP \
+        over Tailscale or SSH). CGEvent clicks needed by `ring` and `--zoom` move the system cursor and steal \
+        keyboard focus; isolating them in a separate session avoids interrupting your main work (coding, gaming).
+        """
+
+    let result = SetupCheck(
+        permissions: Permissions(screenRecording: screenRecording, accessibility: accessibility),
+        optimal: [
+            "virtualDisplay": OptimalCondition(ok: vdOk, detail: vdDetail, recommendation: vdRec),
+            "dedicatedSession": OptimalCondition(ok: dsOk, detail: dsDetail, recommendation: dsRec)
+        ]
+    )
+    emit(result)
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
 guard let sub = args.first else {
-    die("usage: findmy-helper {window|ocr|click|permissions} ...")
+    die("usage: findmy-helper {window|ocr|click|scroll|drag|permissions|setup-check} ...")
 }
 let rest = Array(args.dropFirst())
 switch sub {
@@ -222,5 +316,6 @@ case "click": cmdClick(rest)
 case "drag": cmdDrag(rest)
 case "scroll": cmdScroll(rest)
 case "permissions": cmdPermissions(rest)
+case "setup-check": cmdSetupCheck(rest)
 default: die("unknown subcommand: \(sub)")
 }

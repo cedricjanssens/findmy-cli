@@ -34,19 +34,53 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `findmy — query Find My via UI scraping
+	fmt.Fprintln(os.Stderr, `findmy — query Apple's Find My from the command line via UI scraping.
 
-Usage:
+USAGE
   findmy people [--json] [--keep]
   findmy person <name> [--json] [--zoom] [--keep]
   findmy devices [--json] [--keep]
   findmy ring <device> [--confirm] [--keep]
 
-Flags:
-  --json      emit JSON instead of a human table
-  --zoom      click to get precise street address (person only)
-  --confirm   required for ring — actually plays the sound
-  --keep      leave debug screenshots in /tmp/findmy-cli/`)
+FLAGS
+  --json      output JSON instead of a human-readable table
+  --zoom      click to fetch the precise street address (person only)
+  --confirm   required for ring — actually plays the sound (default: dry-run)
+  --keep      preserve debug screenshots in /tmp/findmy-cli/
+
+RECOMMENDED SETUP
+  Run "findmy-helper setup-check" to verify your environment.
+
+  REQUIRED — TCC permissions
+    Screen Recording  (for screencapture)
+    Accessibility     (for synthesizing clicks / scrolls)
+    Grant in System Settings → Privacy & Security, then fully restart
+    the host process (TCC is read once at process start).
+
+  OPTIMAL — Virtual display (zero visual disruption)
+    The basic commands (people, person without --zoom, devices listing)
+    only need to capture FindMy's window. If FindMy runs on a secondary
+    display (a BetterDisplay virtual screen, or a hardware HDMI/USB-C
+    dummy plug), captures happen invisibly — no flicker, no Space
+    switching, no focus theft.
+      brew install --cask betterdisplay
+    Then move FindMy.app to the virtual display via the Window menu.
+
+  OPTIMAL — Dedicated user session for ring / --zoom
+    The "ring" command and the "--zoom" mode need to click inside
+    FindMy. CGEvent clicks move the system cursor and steal keyboard
+    focus, which interrupts whatever you are doing on your main
+    session (typing, gaming, etc.). Running findmy-cli from a
+    dedicated macOS user account (Fast User Switching) and exposing
+    it remotely (HTTP/MCP over Tailscale, or plain SSH) keeps these
+    interactions isolated from your primary workspace.
+
+EXAMPLES
+  findmy people --json
+  findmy person "cedric.janssens@gmail.com" --zoom --json
+  findmy devices
+  findmy ring "iPhone14PM Christel"            # dry-run, locates button
+  findmy ring "iPhone14PM Christel" --confirm  # actually rings the device`)
 	os.Exit(2)
 }
 

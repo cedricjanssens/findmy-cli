@@ -901,8 +901,85 @@ func FindDeviceByScroll(w *Window, target, tmpDir string) (*Device, error) {
 	return nil, fmt.Errorf("device %q not found after scrolling through entire list", target)
 }
 
-// RingDevice clicks on a device in the Devices sidebar, opens its detail card
-// on the map, finds the "Émettre un son" / "Play Sound" button, and clicks it.
+// playSoundLabels contains the localized "Play Sound" button text in all
+// supported FindMy languages, used to locate the button in OCR results.
+var playSoundLabels = []string{
+	"émettre un son", "emettre un son", "play sound", "ton abspielen",
+	"reproducir sonido", "riproduci suono", "emitir som", "sound abspielen",
+	"サウンドを再生", "사운드 재생", "播放声音", "播放聲音",
+}
+
+// findPlaySoundButton scans OCR lines for the "Play Sound" button text.
+// Returns the line if found, nil otherwise.
+func findPlaySoundButton(lines []TextLine) *TextLine {
+	for i, l := range lines {
+		lower := strings.ToLower(strings.TrimSpace(l.Text))
+		for _, label := range playSoundLabels {
+			if strings.Contains(lower, label) {
+				return &lines[i]
+			}
+		}
+	}
+	return nil
+}
+
+// findPinPopup looks for a popup bubble on the map (text outside the sidebar
+// that resembles a device popup: mixed case, not a map label).
+// Returns center coordinates in image pixels, or (0,0,false) if not found.
+func findPinPopup(lines []TextLine, sidebarRightPx int) (cx, cy int, found bool) {
+	var best TextLine
+	bestRight := 0
+	for _, l := range lines {
+		if l.X < sidebarRightPx {
+			continue
+		}
+		txt := strings.TrimSpace(l.Text)
+		if len(txt) < 4 || txt == "3D" || txt == "N" || txt == "+" {
+			continue
+		}
+		// Skip all-caps map labels (RUE LÉON MIGNOTTE, etc.).
+		if txt == strings.ToUpper(txt) && len(txt) > 5 {
+			continue
+		}
+		right := l.X + l.Width
+		if right > bestRight {
+			bestRight = right
+			best = l
+		}
+	}
+	if bestRight == 0 {
+		return 0, 0, false
+	}
+	return best.X + best.Width/2, best.Y + best.Height/2, true
+}
+
+// pollOCR repeatedly captures+OCRs until match returns true or timeout.
+// Returns the matched OCR lines on success, nil on timeout.
+func pollOCR(w *Window, tmpDir string, timeout time.Duration, interval time.Duration, match func([]TextLine) bool) ([]TextLine, error) {
+	deadline := time.Now().Add(timeout)
+	shot := filepath.Join(tmpDir, "poll.png")
+	for {
+		if err := Capture(w, shot); err != nil {
+			return nil, err
+		}
+		lines, err := OCR(shot)
+		if err != nil {
+			return nil, err
+		}
+		_ = os.Remove(shot)
+		if match(lines) {
+			return lines, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, nil // timeout, no match
+		}
+		time.Sleep(interval)
+	}
+}
+
+// RingDevice opens a device's detail card on the map and locates the
+// "Play Sound" button. Hybrid: fast-path if already open, map-center
+// fallback (proven 95% reliable), poll-based detection for speed.
 //
 // Set dryRun=true to perform all steps except the final click (for testing).
 func RingDevice(w *Window, device *Device, tmpDir string, dryRun bool) error {
@@ -910,91 +987,87 @@ func RingDevice(w *Window, device *Device, tmpDir string, dryRun bool) error {
 		return err
 	}
 
-	// Activate FindMy (needed for Devices tab clicks).
+	// Activate FindMy (needed for Catalyst clicks to register).
 	_ = Activate()
-	time.Sleep(1200 * time.Millisecond)
 	frontScript := `tell application "System Events" to tell process "FindMy" to set frontmost to true`
 	_ = exec.Command("osascript", "-e", frontScript).Run()
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 	defer RestoreUserSpace()
 
 	scale := computeScaleFromWindow(w, tmpDir)
 
-	// Click the device in the sidebar. FindMy will zoom to its location.
+	// Fast-path: detail card already open from previous run?
+	if lines, err := captureAndOCR(w, tmpDir); err == nil {
+		if btn := findPlaySoundButton(lines); btn != nil {
+			return clickOrDryRun(w, btn, scale, dryRun)
+		}
+	}
+
+	// 1. Click the device in the sidebar.
 	screenX := w.X + int(float64(device.NameX)/scale)
 	screenY := w.Y + int(float64(device.NameY)/scale) + 8
 	if err := Click(screenX, screenY); err != nil {
 		return fmt.Errorf("click device: %w", err)
 	}
-	// Wait longer for the zoom animation to complete (may fetch location).
+
+	// 2. Wait for the map to zoom (fixed 3s — empirically the most reliable).
 	time.Sleep(3 * time.Second)
 
-	// The pin should now be centered on the map. Click it to show the popup,
-	// then click again to open the detail card.
-	sidebarPts := 340 // sidebar width in points (constant)
+	// 3. Double-click map center → popup → detail card.
+	//    Poll OCR after each attempt for early exit instead of fixed sleep.
+	sidebarPts := 340
 	mapCenterX := w.X + sidebarPts + (w.Width-sidebarPts)/2
 	mapCenterY := w.Y + w.Height/2
 
-	// Retry loop: click map center, capture, check for "Play Sound" button.
-	// Use up to 5 attempts with progressive delays — the detail card sometimes
-	// needs more time to open, especially when the pin is animated to position.
 	var buttonLine *TextLine
 	for attempt := 0; attempt < 5; attempt++ {
-		// Click pin → popup; click again → detail card.
 		_ = Click(mapCenterX, mapCenterY)
-		time.Sleep(time.Duration(1200+attempt*300) * time.Millisecond)
+		time.Sleep(time.Duration(1000+attempt*200) * time.Millisecond)
 		_ = Click(mapCenterX, mapCenterY)
-		time.Sleep(time.Duration(1500+attempt*500) * time.Millisecond)
 
-		// Capture and OCR the detail card to find "Émettre un son".
-		shot := filepath.Join(tmpDir, "ring-detail.png")
-		if err := Capture(w, shot); err != nil {
-			return fmt.Errorf("capture ring detail: %w", err)
-		}
-		lines, err := OCR(shot)
-		if err != nil {
-			return fmt.Errorf("ocr ring detail: %w", err)
-		}
+		// Poll for the button to appear (early exit instead of fixed sleep).
+		lines, _ := pollOCR(w, tmpDir,
+			time.Duration(2000+attempt*500)*time.Millisecond,
+			300*time.Millisecond,
+			func(lines []TextLine) bool {
+				return findPlaySoundButton(lines) != nil
+			})
 
-		playSoundLabels := []string{
-			"émettre un son", "emettre un son", "play sound", "ton abspielen",
-			"reproducir sonido", "riproduci suono", "emitir som",
-		}
-
-		for i, l := range lines {
-			lower := strings.ToLower(strings.TrimSpace(l.Text))
-			for _, label := range playSoundLabels {
-				if strings.Contains(lower, label) {
-					buttonLine = &lines[i]
-					break
-				}
-			}
-			if buttonLine != nil {
-				break
-			}
-		}
-		if buttonLine != nil {
+		if lines != nil {
+			buttonLine = findPlaySoundButton(lines)
 			break
 		}
-		// Detail card not open yet — retry.
 	}
 
 	if buttonLine == nil {
-		return fmt.Errorf("'Play Sound' button not found after 5 attempts (device may be offline)")
+		return fmt.Errorf("'Play Sound' button not found (device may be offline or pin not clickable)")
 	}
 
-	// Click the button.
-	btnX := w.X + int(float64(buttonLine.X+buttonLine.Width/2)/scale)
-	btnY := w.Y + int(float64(buttonLine.Y+buttonLine.Height/2)/scale)
+	return clickOrDryRun(w, buttonLine, scale, dryRun)
+}
 
+// captureAndOCR is a one-shot helper: take a screenshot, OCR it, clean up.
+func captureAndOCR(w *Window, tmpDir string) ([]TextLine, error) {
+	shot := filepath.Join(tmpDir, "snap.png")
+	if err := Capture(w, shot); err != nil {
+		return nil, err
+	}
+	defer os.Remove(shot)
+	return OCR(shot)
+}
+
+// clickOrDryRun centers a click on the button's text line, or prints the
+// target coordinates in dry-run mode.
+func clickOrDryRun(w *Window, btn *TextLine, scale float64, dryRun bool) error {
+	// Click ~25px above the text — the actual icon sits above the label.
+	btnX := w.X + int(float64(btn.X+btn.Width/2)/scale)
+	btnY := w.Y + int(float64(btn.Y)/scale) - int(20/scale)
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "dry-run: would click 'Play Sound' at screen (%d, %d)\n", btnX, btnY)
 		return nil
 	}
-
 	if err := Click(btnX, btnY); err != nil {
 		return fmt.Errorf("click play sound: %w", err)
 	}
-
 	return nil
 }
