@@ -23,8 +23,12 @@ func main() {
 		runPerson(os.Args[2:])
 	case "devices":
 		runDevices(os.Args[2:])
+	case "phone":
+		runPhone(os.Args[2:])
 	case "ring":
 		runRing(os.Args[2:])
+	case "alias":
+		runAlias(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -40,7 +44,9 @@ USAGE
   findmy people [--json] [--keep]
   findmy person <name> [--json] [--zoom] [--keep]
   findmy devices [--json] [--keep]
-  findmy ring <device> [--confirm] [--keep]
+  findmy phone <device|alias> [--keep]
+  findmy ring <device|alias> [--confirm] [--keep]
+  findmy alias [<name> <device>] [--delete <name>]
 
 FLAGS
   --json      output JSON instead of a human-readable table
@@ -79,6 +85,8 @@ EXAMPLES
   findmy people --json
   findmy person "cedric.janssens@gmail.com" --zoom --json
   findmy devices
+  findmy alias Christel "iPhone14PM Christel"   # register alias
+  findmy phone Christel                         # rings via alias
   findmy ring "iPhone14PM Christel"            # dry-run, locates button
   findmy ring "iPhone14PM Christel" --confirm  # actually rings the device`)
 	os.Exit(2)
@@ -305,13 +313,52 @@ func runDevices(args []string) {
 	}
 }
 
+func runPhone(args []string) {
+	opts, rest := parseOpts(args)
+	if len(rest) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: findmy phone <device|alias>")
+		os.Exit(2)
+	}
+	raw := strings.Join(rest, " ")
+	resolved := findmy.ResolveAlias(raw)
+	if resolved != raw {
+		fmt.Fprintf(os.Stderr, "%s → %s\n", raw, resolved)
+	}
+	target := strings.ToLower(resolved)
+
+	w, err := findmy.PrepareDevices()
+	must(err)
+
+	match, err := findmy.FindDeviceByScroll(w, target, tmpDir())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Fprintf(os.Stderr, "Found: %s\n", match.Name)
+
+	if err := findmy.RingDevice(w, match, tmpDir(), false); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Ringing %s...\n", match.Name)
+
+	_ = findmy.SwitchTab(findmy.GetAppStrings().PeopleTab)
+	findmy.RestoreUserSpace()
+	_ = opts.keep // keep flag handled by RingDevice's internal cleanup
+}
+
 func runRing(args []string) {
 	opts, rest := parseOpts(args)
 	if len(rest) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: findmy ring <device> [--confirm]")
+		fmt.Fprintln(os.Stderr, "usage: findmy ring <device|alias> [--confirm]")
 		os.Exit(2)
 	}
-	target := strings.ToLower(strings.Join(rest, " "))
+	raw := strings.Join(rest, " ")
+	resolved := findmy.ResolveAlias(raw)
+	if resolved != raw {
+		fmt.Fprintf(os.Stderr, "%s → %s\n", raw, resolved)
+	}
+	target := strings.ToLower(resolved)
 
 	if !opts.confirm {
 		fmt.Fprintf(os.Stderr, "This will make the device play a loud sound.\nAdd --confirm to actually ring it.\n")
@@ -345,6 +392,61 @@ func runRing(args []string) {
 	// Restore People tab.
 	_ = findmy.SwitchTab(findmy.GetAppStrings().PeopleTab)
 	findmy.RestoreUserSpace()
+}
+
+func runAlias(args []string) {
+	_, rest := parseOpts(args)
+
+	m := findmy.LoadAliases()
+
+	// findmy alias --delete <name>
+	for i, a := range rest {
+		if a == "--delete" || a == "-delete" {
+			if i+1 >= len(rest) {
+				fmt.Fprintln(os.Stderr, "usage: findmy alias --delete <name>")
+				os.Exit(2)
+			}
+			name := rest[i+1]
+			key := strings.ToLower(name)
+			found := false
+			for k := range m {
+				if strings.ToLower(k) == key {
+					delete(m, k)
+					found = true
+				}
+			}
+			if !found {
+				fmt.Fprintf(os.Stderr, "alias %q not found\n", name)
+				os.Exit(1)
+			}
+			must(findmy.SaveAliases(m))
+			fmt.Printf("deleted alias %q\n", name)
+			return
+		}
+	}
+
+	// findmy alias (list)
+	if len(rest) == 0 {
+		if len(m) == 0 {
+			fmt.Println("(no aliases)")
+			return
+		}
+		for k, v := range m {
+			fmt.Printf("  %s → %s\n", k, v)
+		}
+		return
+	}
+
+	// findmy alias <name> <device>
+	if len(rest) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: findmy alias <name> <device>")
+		os.Exit(2)
+	}
+	name := rest[0]
+	device := strings.Join(rest[1:], " ")
+	m[name] = device
+	must(findmy.SaveAliases(m))
+	fmt.Printf("%s → %s\n", name, device)
 }
 
 func emitJSON(v any) {
