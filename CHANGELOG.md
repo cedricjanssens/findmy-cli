@@ -1,5 +1,16 @@
 # Changelog
 
+## face-detect v0.5.3 — 2026-05-16
+
+### Added
+
+- **FAQ.md** — troubleshooting guide: FIFO deadlock patterns, ANE/Ollama contention, integration tips, model selection.
+
+### Fixed
+
+- **Zombie test false positive** — test 11 ("zero zombies") no longer fails when a pre-existing face-detect daemon (e.g. archiviste) is running.
+- **README: `request_id` → `id`** — watch protocol docs now match actual JSON field name.
+
 ## v0.2.0 — 2026-05-15
 
 Full i18n support, device management, and ring-to-find workflow.
