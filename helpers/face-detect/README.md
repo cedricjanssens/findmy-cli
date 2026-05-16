@@ -1,5 +1,8 @@
 # 👤 face-detect
 
+> **Moved to [github.com/cedricjanssens/face-detect](https://github.com/cedricjanssens/face-detect).**
+> This copy is kept for compatibility but is no longer maintained here.
+
 > Fast face detection + recognition embeddings for macOS — Apple Vision + AdaFace Core ML.
 
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue)](https://www.apple.com/macos/)
