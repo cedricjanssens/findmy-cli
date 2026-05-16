@@ -24,21 +24,22 @@ $(FACE_BIN): $(FACE_SRC)
 	@mkdir -p $(BIN)
 	swiftc -O -framework AVFoundation -framework CoreML -o $@ $<
 
-# Install AdaFace IR-18 Core ML model (~42 MB download, ~48 MB extracted)
+# AdaFace model management
 FACE_MODEL_DIR := /opt/homebrew/share/face-detect
-FACE_MODEL_URL := https://github.com/john-rocky/CoreML-Models/releases/download/adaface-v1/AdaFace_IR18.mlpackage.zip
+FACE_INSTALL_SCRIPT := helpers/face-detect/scripts/install-models.sh
 
-face-detect-model:
-	@if [ -d "$(FACE_MODEL_DIR)/AdaFace_IR18.mlpackage" ]; then \
-		echo "Model already installed at $(FACE_MODEL_DIR)"; \
-	else \
-		echo "Downloading AdaFace IR-18..."; \
-		mkdir -p $(FACE_MODEL_DIR); \
-		curl -fL --output /tmp/AdaFace_IR18.mlpackage.zip $(FACE_MODEL_URL); \
-		cd $(FACE_MODEL_DIR) && unzip -q -o /tmp/AdaFace_IR18.mlpackage.zip; \
-		rm /tmp/AdaFace_IR18.mlpackage.zip; \
-		echo "Model installed at $(FACE_MODEL_DIR)/AdaFace_IR18.mlpackage"; \
-	fi
+face-detect-model: face-detect-models-ir18
+
+face-detect-models-ir18:
+	@$(FACE_INSTALL_SCRIPT) ir18
+
+face-detect-models-ir50:
+	@$(FACE_INSTALL_SCRIPT) ir50
+
+face-detect-models: face-detect-models-ir18 face-detect-models-ir50
+
+face-detect-models-status:
+	@$(FACE_INSTALL_SCRIPT) status
 
 $(GO_BIN): $(shell find cmd internal -name '*.go') go.mod
 	@mkdir -p $(BIN)
